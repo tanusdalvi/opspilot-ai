@@ -1,13 +1,20 @@
-"""Schema contracts for the Phase 4A investigation context pack.
+"""Schema contracts for the agentic investigation layer.
 
-Central location for every structural constant describing the evidence
-pack produced by ``agent.evidence.build_investigation_context``: exact
-top-level keys, the parameter block, the focus-filter specification,
-evidence entry kinds and their per-kind fields, and the embedded
-narrative instructions consumed by the Phase 4B narrator.
+Central location for every structural constant describing:
+
+* Phase 4A — the evidence pack produced by
+  ``agent.evidence.build_investigation_context`` (top-level keys, the
+  parameter block, the focus-filter specification, evidence entry kinds
+  and their per-kind fields, and the embedded narrative instructions).
+* Phase 4B — the result contract returned by
+  ``agent.investigator.investigate`` (statuses, exact top-level keys,
+  narrative/finding/hypothesis/citation shapes, grounding-report shape,
+  and the safe fallback narrative used when a generated narrative is
+  rejected).
 
 The module intentionally contains data descriptions only; all assembly
-and validation logic lives in ``agent.evidence``.
+and validation logic lives in ``agent.evidence`` and
+``agent.investigator``.
 """
 
 from __future__ import annotations
@@ -129,4 +136,66 @@ NARRATIVE_INSTRUCTIONS: dict[str, object] = {
         "Use correlational language; never claim causation.",
         "Never invent dates, entities, metrics, scores, or values.",
     ),
+}
+
+# --- Investigation result (Phase 4B) -----------------------------------------------
+
+INVESTIGATION_RESULT_TYPE: str = "investigation_result"
+
+RESULT_SCHEMA_VERSION: str = "1.0"
+
+# The only statuses ``investigate`` may ever return.
+INVESTIGATION_STATUSES: frozenset[str] = frozenset(
+    {"complete", "narrative_rejected"}
+)
+
+# Exact top-level keys of the public investigation result.
+EXPECTED_RESULT_KEYS: frozenset[str] = frozenset(
+    {
+        "status",
+        "evidence_pack",
+        "narrative",
+        "hypotheses",
+        "citations",
+        "grounding_report",
+    }
+)
+
+# Exact keys of the narrative block and its finding entries.
+EXPECTED_NARRATIVE_KEYS: frozenset[str] = frozenset(
+    {"executive_summary", "key_findings", "operational_interpretation"}
+)
+
+EXPECTED_FINDING_KEYS: frozenset[str] = frozenset({"claim", "evidence_ids"})
+
+# Exact keys of a hypothesis entry.
+EXPECTED_HYPOTHESIS_KEYS: frozenset[str] = frozenset(
+    {"hypothesis", "factor", "confidence", "evidence_ids"}
+)
+
+# Exact keys of a citation entry.
+EXPECTED_CITATION_KEYS: frozenset[str] = frozenset({"evidence_id", "claim"})
+
+# Exact keys of the grounding report.
+EXPECTED_GROUNDING_REPORT_KEYS: frozenset[str] = frozenset(
+    {
+        "valid",
+        "citation_errors",
+        "numeric_errors",
+        "causation_errors",
+        "schema_errors",
+        "unsupported_claims",
+    }
+)
+
+# Safe minimal narrative used when every generated attempt fails grounding.
+# It contains no operational facts, so it can never be "unsupported".
+FALLBACK_NARRATIVE: dict[str, object] = {
+    "executive_summary": (
+        "The generated narrative failed grounding validation and was "
+        "rejected; no narrative findings are reported. Review the "
+        "deterministic evidence pack directly."
+    ),
+    "key_findings": [],
+    "operational_interpretation": [],
 }
