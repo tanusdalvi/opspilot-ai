@@ -11,10 +11,14 @@ Central location for every structural constant describing:
   narrative/finding/hypothesis/citation shapes, grounding-report shape,
   and the safe fallback narrative used when a generated narrative is
   rejected).
+* Phase 5 — the plan contract returned by
+  ``agent.recommendation_service.generate_recommendations`` (plan/source/
+  summary key sets, the exact 17-field recommendation record, the closed
+  action-type vocabulary, and priority band edges).
 
 The module intentionally contains data descriptions only; all assembly
-and validation logic lives in ``agent.evidence`` and
-``agent.investigator``.
+and validation logic lives in ``agent.evidence``,
+``agent.investigator``, and ``agent.recommendation_service``.
 """
 
 from __future__ import annotations
@@ -199,3 +203,85 @@ FALLBACK_NARRATIVE: dict[str, object] = {
     "key_findings": [],
     "operational_interpretation": [],
 }
+
+# --- Recommendation plan (Phase 5) ---------------------------------------------------
+
+RECOMMENDATION_PLAN_TYPE: str = "recommendation_plan"
+
+RECOMMENDATION_SCHEMA_VERSION: str = "1.0"
+
+# Exact top-level keys of the public recommendation plan.
+EXPECTED_PLAN_KEYS: frozenset[str] = frozenset(
+    {
+        "type",
+        "schema_version",
+        "parameters",
+        "source",
+        "recommendations",
+        "summary",
+    }
+)
+
+# Exact keys of the plan's provenance block.
+EXPECTED_SOURCE_KEYS: frozenset[str] = frozenset(
+    {
+        "anomaly_count",
+        "group_count",
+        "investigation_status",
+        "cited_evidence_ids",
+    }
+)
+
+# Exact keys of the plan's summary block.
+EXPECTED_SUMMARY_KEYS: frozenset[str] = frozenset(
+    {"total_count", "by_priority", "by_action_type"}
+)
+
+# Exact keys of a single recommendation record.
+RECOMMENDATION_KEYS: frozenset[str] = frozenset(
+    {
+        "recommendation_id",
+        "priority",
+        "priority_score",
+        "action_type",
+        "title",
+        "description",
+        "scope",
+        "target_entity",
+        "target_metric",
+        "date_window",
+        "source_factors",
+        "source_anomaly_indices",
+        "source_group_ids",
+        "evidence_ids",
+        "evidence_strength",
+        "requires_human_review",
+        "status",
+    }
+)
+
+# Closed vocabulary of deterministic playbook action types.
+ACTION_TYPES: frozenset[str] = frozenset(
+    {
+        "demand_capacity_review",
+        "revenue_operations_review",
+        "cost_variance_review",
+        "supplier_escalation_review",
+        "fulfillment_bottleneck_review",
+        "pricing_margin_review",
+        "entity_performance_review",
+        "manual_investigation",
+    }
+)
+
+# Priority labels reuse the shared severity vocabulary for cross-layer
+# consistency with anomaly records and groups.
+PRIORITY_LABELS: frozenset[str] = frozenset({"CRITICAL", "HIGH", "MEDIUM", "LOW"})
+
+# Inclusive minimum priority scores for each label; identical edges to the
+# anomaly severity bands so both layers rank on one shared scale.
+PRIORITY_CRITICAL_MIN_SCORE: float = 85.0
+PRIORITY_HIGH_MIN_SCORE: float = 70.0
+PRIORITY_MEDIUM_MIN_SCORE: float = 50.0
+
+DATE_WINDOW_KEYS: frozenset[str] = frozenset({"start", "end"})
