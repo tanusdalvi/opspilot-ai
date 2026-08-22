@@ -15,10 +15,15 @@ Central location for every structural constant describing:
   ``agent.recommendation_service.generate_recommendations`` (plan/source/
   summary key sets, the exact 17-field recommendation record, the closed
   action-type vocabulary, and priority band edges).
+* Phase 6 — the human review workflow contract used by
+  ``agent.review_service`` (the extra review status, the closed decision
+  vocabulary, the explicit valid-transition table, and the structured
+  review-event shape).
 
 The module intentionally contains data descriptions only; all assembly
 and validation logic lives in ``agent.evidence``,
-``agent.investigator``, and ``agent.recommendation_service``.
+``agent.investigator``, ``agent.recommendation_service``, and
+``agent.review_service``.
 """
 
 from __future__ import annotations
@@ -285,3 +290,44 @@ PRIORITY_HIGH_MIN_SCORE: float = 70.0
 PRIORITY_MEDIUM_MIN_SCORE: float = 50.0
 
 DATE_WINDOW_KEYS: frozenset[str] = frozenset({"start", "end"})
+
+# --- Human review workflow (Phase 6) ---------------------------------------------------
+
+# PENDING, APPROVED, and REJECTED live in core.constants (reserved since
+# Phase 1); only the revision-loop status is new here.
+RECOMMENDATION_CHANGES_REQUESTED: str = "CHANGES_REQUESTED"
+
+# Closed vocabulary of explicit reviewer decisions.
+REVIEW_DECISIONS: frozenset[str] = frozenset(
+    {"APPROVE", "REJECT", "REQUEST_CHANGES", "RESUBMIT"}
+)
+
+# Structured review events record what happened without ever replacing
+# the reviewed recommendation.
+REVIEW_EVENT_TYPE: str = "recommendation_review"
+
+EXPECTED_REVIEW_EVENT_KEYS: frozenset[str] = frozenset(
+    {
+        "event_type",
+        "recommendation_id",
+        "reviewer_id",
+        "previous_status",
+        "new_status",
+        "decision",
+        "comment",
+        "occurred_at",
+    }
+)
+
+# Explicit state machine: (current_status, decision) -> new_status.
+# Status strings mirror core.constants' reserved recommendation statuses.
+# APPROVED and REJECTED are terminal; EXECUTED intentionally does not
+# exist in this table because Phase 6 never executes anything. The
+# RESUBMIT edge implements the approved CHANGES_REQUESTED -> PENDING
+# revision loop (a revised recommendation returns for review).
+VALID_REVIEW_TRANSITIONS: dict[tuple[str, str], str] = {
+    ("PENDING", "APPROVE"): "APPROVED",
+    ("PENDING", "REJECT"): "REJECTED",
+    ("PENDING", "REQUEST_CHANGES"): RECOMMENDATION_CHANGES_REQUESTED,
+    (RECOMMENDATION_CHANGES_REQUESTED, "RESUBMIT"): "PENDING",
+}
