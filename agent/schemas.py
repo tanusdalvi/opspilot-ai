@@ -19,6 +19,10 @@ Central location for every structural constant describing:
   ``agent.review_service`` (the extra review status, the closed decision
   vocabulary, the explicit valid-transition table, and the structured
   review-event shape).
+* Phase 7 — the persistence & audit contract implemented by the
+  ``database`` package (SQLite via SQLAlchemy: connection, models,
+  repository) which stores Phase 5 recommendation plans and records and
+  Phase 6 review events as an append-only audit trail.
 
 The module intentionally contains data descriptions only; all assembly
 and validation logic lives in ``agent.evidence``,
@@ -331,3 +335,11 @@ VALID_REVIEW_TRANSITIONS: dict[tuple[str, str], str] = {
     ("PENDING", "REQUEST_CHANGES"): RECOMMENDATION_CHANGES_REQUESTED,
     (RECOMMENDATION_CHANGES_REQUESTED, "RESUBMIT"): "PENDING",
 }
+
+# --- Persistence & audit store (Phase 7) ------------------------------------------------
+
+# Version of the persistence contract implemented by the ``database``
+# package (SQLite via SQLAlchemy). Stored plans, recommendations, and
+# review events are exact snapshots of the Phase 5/6 structures already
+# described above; this version covers the storage layout only.
+PERSISTENCE_SCHEMA_VERSION: str = "1.0"
