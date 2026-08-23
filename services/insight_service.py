@@ -245,6 +245,43 @@ class _ContextTables:
             for metric in self.metrics
         }
 
+        # Localization lookup structures derived from ``entity_daily`` so
+        # ``_localization_for`` never re-parses dates or re-drops nulls
+        # per anomaly. For each (dimension, metric): an ISO-date ->
+        # frame-position map, plus one entry per entity (visited in the
+        # same sorted-by-name order as the original per-anomaly loop)
+        # carrying the entity's observed (non-null) values as a float
+        # array and an ISO-date -> observed-position map. Built once per
+        # analysis context; nothing here outlives the tables instance.
+        self.localization_index: dict[
+            tuple[str, str],
+            tuple[dict[str, int], list[tuple[str, "np.ndarray", dict[str, int]]]],
+        ] = {}
+        for dimension in LOCALIZATION_DIMENSIONS:
+            for metric in self.metrics:
+                frame = self.entity_daily[(dimension, metric)]
+                frame_positions = {
+                    stamp.strftime("%Y-%m-%d"): position
+                    for position, stamp in enumerate(frame.index)
+                }
+                entities: list[tuple[str, np.ndarray, dict[str, int]]] = []
+                for entity in sorted(map(str, frame.columns)):
+                    observed = frame[entity].dropna()
+                    entities.append(
+                        (
+                            entity,
+                            observed.to_numpy(dtype=float),
+                            {
+                                stamp.strftime("%Y-%m-%d"): observed_position
+                                for observed_position, stamp in enumerate(observed.index)
+                            },
+                        )
+                    )
+                self.localization_index[(dimension, metric)] = (
+                    frame_positions,
+                    entities,
+                )
+
         # Full-period per-entity aggregates used by peer profiling.
         self.entity_aggregates: dict[str, pd.DataFrame] = {}
         for dimension in LOCALIZATION_DIMENSIONS:
@@ -330,6 +367,11 @@ def _localization_for(
     concentrated dimension wins; tie goes to ``region``) or ``None``
     when no dimension yields a usable contributor pool. Entities need
     their own ``MIN_HISTORY_DAYS`` prior observed values to participate.
+
+    All date/entity positions come from the precomputed
+    ``tables.localization_index``; this function performs dictionary
+    lookups and numpy slicing only, so per-anomaly cost is independent
+    of dataset length.
     """
     position = tables.date_positions.get(iso_date)
     if position is None or position < MIN_HISTORY_DAYS:
@@ -340,24 +382,17 @@ def _localization_for(
     best: tuple[float, int, dict[str, object]] | None = None
 
     for dimension in LOCALIZATION_DIMENSIONS:
-        frame = tables.entity_daily[(dimension, metric)]
-        if iso_date not in [stamp.strftime("%Y-%m-%d") for stamp in frame.index]:
+        entry = tables.localization_index[(dimension, metric)]
+        frame_positions, entities = entry
+        if iso_date not in frame_positions:
             continue
         contributions: list[tuple[str, float]] = []
-        for entity in sorted(map(str, frame.columns)):
-            column = frame[entity]
-            observed = column.dropna()
-            stamps = [_date.fromisoformat(stamp.strftime("%Y-%m-%d")) for stamp in observed.index]
-            target = _date.fromisoformat(iso_date)
-            if target not in stamps:
+        for entity, values, observed_positions in entities:
+            entity_position = observed_positions.get(iso_date)
+            if entity_position is None or entity_position < MIN_HISTORY_DAYS:
                 continue
-            entity_position = stamps.index(target)
-            if entity_position < MIN_HISTORY_DAYS:
-                continue
-            window = observed.iloc[
-                entity_position - MIN_HISTORY_DAYS : entity_position
-            ].to_numpy(dtype=float)
-            deviation = float(observed.iloc[entity_position]) - float(np.mean(window))
+            window = values[entity_position - MIN_HISTORY_DAYS : entity_position]
+            deviation = float(values[entity_position]) - float(np.mean(window))
             contributions.append((entity, deviation))
 
         deviations = [deviation for _, deviation in contributions]
