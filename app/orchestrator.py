@@ -35,6 +35,7 @@ from agent.review_service import (
     resubmit_recommendation,
 )
 from core.config import DATA_DIR
+from core.constants import MAX_UPLOAD_BYTES, UPLOAD_DUPLICATE_POLICY
 from core.exceptions import ConfigurationError, DataValidationError
 from database import repository
 from services.analytics_service import (
@@ -111,8 +112,21 @@ def stage_upload(filename: object, content: bytes) -> Path:
     Only the base filename is kept; parent-path components are dropped so
     an upload can never escape the uploads directory.
 
+    Duplicate policy: when an upload reuses an existing basename, the
+    staged file is replaced deterministically
+    (``core.constants.UPLOAD_DUPLICATE_POLICY``). Staged files are
+    transient working copies and are never persisted to the audit store,
+    so replacement cannot affect recorded history.
+
+    Files larger than ``core.constants.MAX_UPLOAD_BYTES`` are rejected
+    before any disk write or parsing work happens.
+
     Returns:
         Path of the staged file, ready for :func:`load_csv`.
+
+    Raises:
+        DataValidationError: On missing names, empty content, non-CSV
+            extensions, or oversized uploads.
     """
     if not isinstance(filename, str) or not filename.strip():
         raise DataValidationError("Uploaded file has no name")
@@ -121,6 +135,12 @@ def stage_upload(filename: object, content: bytes) -> Path:
     safe_name = Path(filename).name
     if Path(safe_name).suffix.lower() != ".csv":
         raise DataValidationError(f"Only CSV uploads are supported; got {safe_name!r}")
+    if len(content) > MAX_UPLOAD_BYTES:
+        limit_mib = MAX_UPLOAD_BYTES // (1024 * 1024)
+        raise DataValidationError(
+            f"Upload is too large ({len(content):,} bytes); the limit is "
+            f"{limit_mib} MiB. Export a smaller date range and try again."
+        )
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     target = UPLOAD_DIR / safe_name
     target.write_bytes(content)
@@ -128,8 +148,30 @@ def stage_upload(filename: object, content: bytes) -> Path:
 
 
 def load_uploaded_dataset(filename: object, content: bytes) -> pd.DataFrame:
-    """Stage and load an uploaded CSV into a DataFrame."""
-    return load_csv(stage_upload(filename, content))
+    """Stage and load an uploaded CSV into a DataFrame.
+
+    Common parse failures are mapped to typed, user-facing validation
+    errors so raw pandas/driver details never reach the interface.
+    """
+    staged = stage_upload(filename, content)
+    try:
+        return load_csv(staged)
+    except pd.errors.EmptyDataError as exc:
+        raise DataValidationError(
+            "The uploaded file contains no CSV data (it is empty or has "
+            "only a header row with no delimiter content)."
+        ) from exc
+    except UnicodeDecodeError as exc:
+        raise DataValidationError(
+            "The uploaded file could not be read as text — it appears to be "
+            "binary or uses an unsupported encoding. Please upload a UTF-8 "
+            "CSV file."
+        ) from exc
+    except pd.errors.ParserError as exc:
+        raise DataValidationError(
+            "The uploaded file is not a well-formed CSV (malformed rows or "
+            "inconsistent columns). Check the delimiter and column layout."
+        ) from exc
 
 
 # --- validation gate ----------------------------------------------------------------------

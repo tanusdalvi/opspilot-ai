@@ -494,6 +494,99 @@ def record_review(
 # --- read path (deterministic queries) ----------------------------------------------------
 
 
+def _parse_json_column(raw: object, label: str) -> dict:
+    """Parse one stored canonical JSON column into a plain dict.
+
+    Persisted plan provenance was written through :func:`_canonical_json`,
+    so any deviation here means the stored row is corrupted; reads fail
+    closed with ``DataValidationError`` instead of fabricating content.
+    """
+    if not isinstance(raw, str) or not raw:
+        raise DataValidationError(f"stored {label} is missing or empty")
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise DataValidationError(f"stored {label} is corrupted") from exc
+    if not isinstance(parsed, dict):
+        raise DataValidationError(f"stored {label} is corrupted")
+    return parsed
+
+
+def _plan_row_to_dict(row: PlanRecord) -> dict[str, Any]:
+    """Project one ``PlanRecord`` onto its public provenance dictionary."""
+    return {
+        "plan_id": int(row.id),
+        "recorded_at": str(row.recorded_at),
+        "storage_schema_version": str(row.storage_schema_version),
+        "schema_version": str(row.schema_version),
+        "plan_type": str(row.plan_type),
+        "parameters": _parse_json_column(row.parameters_json, "plan parameters"),
+        "source": _parse_json_column(row.source_json, "plan source"),
+        "summary": _parse_json_column(row.summary_json, "plan summary"),
+    }
+
+
+def list_plans(engine: Engine) -> list[dict]:
+    """Return every stored plan's provenance ordered by insertion.
+
+    Each entry carries the plan identity/timestamps, its stored
+    ``parameters``, ``source``, and ``summary`` blocks, and the number of
+    recommendation snapshots recorded under it (``recommendation_count``).
+    Results are deterministic: plans ascending by id.
+
+    Raises:
+        DataValidationError: If any stored plan block is corrupted.
+    """
+    with Session(engine) as session:
+        rows = session.scalars(select(PlanRecord).order_by(PlanRecord.id.asc())).all()
+        count_rows = session.execute(
+            select(RecommendationRecord.plan_id, func.count())
+            .where(RecommendationRecord.plan_id.isnot(None))
+            .group_by(RecommendationRecord.plan_id)
+        ).all()
+    counts = {int(plan_id): int(total) for plan_id, total in count_rows}
+    plans = [_plan_row_to_dict(row) for row in rows]
+    for plan in plans:
+        plan["recommendation_count"] = counts.get(int(plan["plan_id"]), 0)
+    return plans
+
+
+def get_plan(engine: Engine, plan_id: object) -> dict | None:
+    """Return the complete stored provenance for one plan, or ``None``.
+
+    The result includes the full provenance blocks plus every immutable
+    recommendation snapshot recorded under the plan (exact 17-key Phase 5
+    records), ordered by insertion. Review events are keyed by
+    recommendation id rather than plan id and are therefore retrieved
+    separately via :func:`list_review_events`.
+
+    Args:
+        engine: SQLAlchemy engine created by ``database.connection``.
+        plan_id: Positive integer plan row id.
+
+    Raises:
+        DataValidationError: If ``plan_id`` is malformed or any stored
+            block belonging to the plan is corrupted.
+    """
+    if isinstance(plan_id, bool) or not isinstance(plan_id, int) or plan_id < 1:
+        raise DataValidationError(f"plan_id must be a positive int; got {plan_id!r}")
+    with Session(engine) as session:
+        row = session.get(PlanRecord, plan_id)
+        if row is None:
+            return None
+        plan = _plan_row_to_dict(row)
+        stmt = (
+            select(RecommendationRecord)
+            .where(RecommendationRecord.plan_id == plan_id)
+            .order_by(RecommendationRecord.id.asc())
+        )
+        plan["recommendations"] = [
+            _row_to_recommendation(snapshot)
+            for snapshot in session.scalars(stmt).all()
+        ]
+    return plan
+
+
 def get_latest_recommendation(engine: Engine, recommendation_id: object) -> dict | None:
     """Return the newest stored snapshot for ``recommendation_id``, or None.
 
@@ -571,6 +664,8 @@ __all__ = [
     "count_recommendations",
     "count_review_events",
     "get_latest_recommendation",
+    "get_plan",
+    "list_plans",
     "list_recommendations",
     "list_review_events",
     "record_plan",

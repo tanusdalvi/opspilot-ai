@@ -26,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.exceptions import OpsPilotError
+from core.exceptions import DatabaseError, OpsPilotError
 from database.connection import connect, init_db
 
 # --- analysis lifecycle ----------------------------------------------------------------------
@@ -97,6 +97,16 @@ def get_engine():
     return engine
 
 
+# Safe user-facing message for database failures. Raw SQLAlchemy/driver
+# text (SQL fragments, file paths, connection details) must never reach
+# the interface, so ``DatabaseError`` is rendered with this static string
+# at the presentation boundary; the exception taxonomy itself is unchanged.
+DATABASE_UI_ERROR: str = (
+    "**Database error** - the audit store could not be accessed. "
+    "Please retry; if the problem persists, restart the application."
+)
+
+
 def run_page(title: str, subtitle: str | None, render: Callable[[], None]) -> None:
     """Render one page inside the shared error boundary."""
     st.title(title)
@@ -104,8 +114,10 @@ def run_page(title: str, subtitle: str | None, render: Callable[[], None]) -> No
         st.caption(subtitle)
     try:
         render()
+    except DatabaseError:
+        st.error(DATABASE_UI_ERROR)
     except OpsPilotError as exc:
-        st.error(f"**{type(exc).__name__}** — {exc}")
+        st.error(f"**{type(exc).__name__}** - {exc}")
     except Exception as exc:  # noqa: BLE001 - final user-facing boundary
         st.error(f"Unexpected application error ({type(exc).__name__}). Please retry.")
 

@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app import orchestrator  # noqa: E402
 from app.state import run_page  # noqa: E402
+from core.constants import UPLOAD_ROW_ADVISORY  # noqa: E402
 
 # Derived artifacts invalidated whenever a new dataset becomes active.
 # ``analysis_status`` resets to its IDLE default: a fresh dataset means
@@ -94,7 +95,9 @@ def render_data() -> None:
             st.caption(
                 "Required columns: date, region, product, units_sold, revenue, "
                 "cost, lead_time_days. Uploads are staged under gitignored "
-                "data/uploads/ and never persisted to the audit store."
+                "data/uploads/ and never persisted to the audit store. "
+                f"Maximum size: {orchestrator.MAX_UPLOAD_BYTES // (1024 * 1024)} MiB; "
+                "re-uploading the same filename replaces the staged copy."
             )
             if upload is not None and st.button("Load uploaded file", type="primary",
                                                 icon="📤"):
@@ -110,6 +113,13 @@ def render_data() -> None:
     if df is None or not name:
         st.info("Load a demo dataset or upload a CSV to begin.")
         return
+
+    if len(df) > UPLOAD_ROW_ADVISORY:
+        st.warning(
+            f"This dataset has {len(df):,} rows (above the "
+            f"{UPLOAD_ROW_ADVISORY:,}-row advisory). It will still load and "
+            "analyze normally, but analysis may take noticeably longer."
+        )
 
     st.divider()
     active_cols = st.columns([3, 1, 1])

@@ -28,3 +28,18 @@ RECOMMENDATION_PENDING = "PENDING"
 RECOMMENDATION_APPROVED = "APPROVED"
 RECOMMENDATION_REJECTED = "REJECTED"
 RECOMMENDATION_REVIEW = "REVIEW"
+
+# --- CSV upload hardening (Phase 9) -----------------------------------------
+
+# Hard ceiling on staged CSV uploads, in bytes. Oversized uploads are
+# rejected before any parsing work happens. Demo-safe default: 20 MiB.
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+# Advisory-only row threshold. Datasets above this size still load and
+# analyze normally; the UI simply warns that processing may take longer.
+UPLOAD_ROW_ADVISORY = 500_000
+
+# Duplicate-basename policy for uploads: an identical basename replaces
+# the previously staged file deterministically (uploads are transient
+# staging copies and are never part of the audit store).
+UPLOAD_DUPLICATE_POLICY = "replace"

@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app import exports  # noqa: E402
 from app.state import require_artifacts, run_page  # noqa: E402
 from database import repository as repo  # noqa: E402
 
@@ -81,6 +82,32 @@ def render_overview() -> None:
     st.caption(
         "Changes compare the two halves of the timeline; lead-time increases are "
         "shown without a good/bad colour because impact depends on context."
+    )
+
+    st.divider()
+    st.subheader("Exports")
+    st.caption(
+        "Deterministic machine-readable snapshots of the current analysis. "
+        "Identical data always produces identical files."
+    )
+    export_base = "".join(
+        character for character in Path(artifacts.dataset_name).stem
+        if character.isalnum() or character in "-_"
+    ) or "dataset"
+    left, right = st.columns(2)
+    left.download_button(
+        "Download Analysis Summary (JSON)",
+        data=exports.canonical_json(exports.analysis_summary_payload(artifacts)),
+        file_name=f"{export_base}-analysis-summary.json",
+        mime="application/json",
+        icon="⬇️",
+    )
+    right.download_button(
+        "Download Anomalies (CSV)",
+        data=exports.anomalies_csv_text(artifacts),
+        file_name=f"{export_base}-anomalies.csv",
+        mime="text/csv",
+        icon="⬇️",
     )
 
     st.divider()

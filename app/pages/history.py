@@ -11,8 +11,76 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app import exports  # noqa: E402
 from app.state import get_engine, run_page  # noqa: E402
 from database import repository as repo  # noqa: E402
+
+
+def _render_plans(engine) -> None:
+    st.subheader("Plans")
+    plans = repo.list_plans(engine)
+    if not plans:
+        st.info("No plans persisted yet. Generate a plan on the Recommendations page.")
+        return
+    rows = [
+        {
+            "plan_id": p["plan_id"],
+            "recorded_at": p["recorded_at"],
+            "type": p["plan_type"],
+            "schema": p["schema_version"],
+            "recommendations": p["recommendation_count"],
+            "anomaly_count": p["source"].get("anomaly_count"),
+            "investigation": p["source"].get("investigation_status") or "—",
+        }
+        for p in plans
+    ]
+    st.dataframe(rows, use_container_width=True)
+
+    for p in plans:
+        with st.expander(
+            f"Plan #{p['plan_id']} · recorded {p['recorded_at']} · "
+            f"{p['recommendation_count']} recommendation(s)",
+            expanded=False,
+        ):
+            left, right = st.columns(2)
+            with left:
+                st.caption("**Parameters**")
+                st.json(p["parameters"])
+            with right:
+                st.caption("**Source provenance**")
+                st.json(p["source"])
+            st.caption("**Summary**")
+            st.json(p["summary"])
+
+            full = repo.get_plan(engine, p["plan_id"])
+            snapshots = (full or {}).get("recommendations", [])
+            if snapshots:
+                st.dataframe(
+                    [
+                        {
+                            "id": snap["recommendation_id"],
+                            "priority": snap["priority"],
+                            "score": snap["priority_score"],
+                            "action": snap["action_type"],
+                            "status": snap["status"],
+                            "evidence": ", ".join(snap["evidence_ids"]) or "—",
+                        }
+                        for snap in snapshots
+                    ],
+                    use_container_width=True,
+                )
+
+    payload = exports.plan_audit_payload(
+        [repo.get_plan(engine, p["plan_id"]) for p in plans],
+        repo.list_review_events(engine),
+    )
+    st.download_button(
+        "Download Plans + Audit (JSON)",
+        data=exports.canonical_json(payload),
+        file_name="opspilot-plan-audit-export.json",
+        mime="application/json",
+        icon="⬇️",
+    )
 
 
 def render_history() -> None:
@@ -28,6 +96,9 @@ def render_history() -> None:
         "deleted. Each review creates a new recommendation snapshot next to "
         "its structured event."
     )
+
+    st.divider()
+    _render_plans(engine)
 
     st.divider()
     st.subheader("Recommendation snapshots")
