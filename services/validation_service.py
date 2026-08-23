@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import numbers
 
+import numpy as np
 import pandas as pd
 
 from core.exceptions import DataValidationError
@@ -133,12 +134,38 @@ def _is_null(value: object) -> bool:
     return bool(result) if isinstance(result, bool) else False
 
 
-def _validate_text_column(series: pd.Series, column: str) -> list[dict[str, object]]:
-    """Report non-null values in ``column`` that are not strings."""
-    def bad(value: object) -> bool:
-        return not _is_null(value) and not isinstance(value, str)
+def _is_numpy_numeric(series: pd.Series) -> bool:
+    """Return ``True`` for plain numpy numeric dtypes (never nullable)."""
+    dtype = series.dtype
+    return (
+        pd.api.types.is_float_dtype(dtype)
+        or pd.api.types.is_signed_integer_dtype(dtype)
+        or pd.api.types.is_unsigned_integer_dtype(dtype)
+    ) and not isinstance(dtype, pd.api.extensions.ExtensionDtype)
 
-    mask = series.map(bad)
+
+# Every scalar of these dtypes is a registered ``numbers.Real`` and never a
+# ``bool``, so the per-value type predicate is vacuously satisfied.
+_NUMPY_NUMERIC_KINDS = frozenset("fiu")
+
+
+def _validate_text_column(series: pd.Series, column: str) -> list[dict[str, object]]:
+    """Report non-null values in ``column`` that are not strings.
+
+    Vectorized over ``not null``; the string-type predicate runs once per
+    non-null value via a comprehension over raw values (identical to the
+    historical element-wise semantics for every input type).
+    """
+    not_null = ~series.isna()
+    if bool(not_null.any()):
+        raw = series.to_numpy()
+        null_values = pd.isna(raw)
+        bad_values = np.array(
+            [not isinstance(v, str) for v in raw], dtype=bool
+        )
+        mask = pd.Series(bad_values & ~null_values, index=series.index)
+    else:
+        mask = pd.Series(False, index=series.index)
     if not mask.any():
         return []
     return [
@@ -159,11 +186,22 @@ def _is_valid_number(value: object) -> bool:
 
 
 def _validate_numeric_column(series: pd.Series, column: str) -> list[dict[str, object]]:
-    """Report non-null values in ``column`` that are not numeric."""
+    """Report non-null values in ``column`` that are not numeric.
+
+    Plain numpy numeric columns are valid by construction (fast path);
+    everything else falls back to the exact per-value predicate.
+    """
+    issues: list[dict[str, object]] = []
+    fast_valid = (
+        _is_numpy_numeric(series)
+        or series.empty
+    )
+    if fast_valid:
+        return issues
+
     def bad(value: object) -> bool:
         return not _is_null(value) and not _is_valid_number(value)
 
-    issues: list[dict[str, object]] = []
     mask = series.map(bad)
     if mask.any():
         issues.append(
@@ -178,17 +216,34 @@ def _validate_numeric_column(series: pd.Series, column: str) -> list[dict[str, o
 
 
 def _validate_numeric_range(series: pd.Series, column: str) -> list[dict[str, object]]:
-    """Report numeric values outside the configured inclusive bounds."""
+    """Report numeric values outside the configured inclusive bounds.
+
+    Fast path compares whole numpy arrays at C speed; NaN compares
+    ``False`` against both bounds exactly like the per-value predicate.
+    """
     minimum, maximum = NUMERIC_RANGES[column]
+    if minimum is None and maximum is None:
+        return []
 
-    def out_of_range(value: object) -> bool:
-        if not _is_valid_number(value):
-            return False
-        if minimum is not None and value < minimum:
-            return True
-        return maximum is not None and value > maximum
+    if _is_numpy_numeric(series) and series.dtype.kind in _NUMPY_NUMERIC_KINDS:
+        values = series.to_numpy()
+        exceeds = np.zeros(len(values), dtype=bool)
+        if minimum is not None:
+            exceeds |= values < minimum
+        if maximum is not None:
+            exceeds |= values > maximum
+        mask = pd.Series(exceeds, index=series.index)
+    else:
 
-    mask = series.map(out_of_range)
+        def out_of_range(value: object) -> bool:
+            if not _is_valid_number(value):
+                return False
+            if minimum is not None and value < minimum:
+                return True
+            return maximum is not None and value > maximum
+
+        mask = series.map(out_of_range)
+
     if not mask.any():
         return []
     bound_text = f"[{minimum}, {maximum}]".replace(", None]", ", inf]")
