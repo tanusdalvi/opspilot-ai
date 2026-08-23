@@ -16,6 +16,7 @@ called from the orchestrator.
 
 from __future__ import annotations
 
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -27,7 +28,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.exceptions import DatabaseError, OpsPilotError
+from core.logging import get_logger, log_event
 from database.connection import connect, init_db
+
+logger = get_logger(__name__)
 
 # --- analysis lifecycle ----------------------------------------------------------------------
 #
@@ -37,33 +41,113 @@ from database.connection import connect, init_db
 # READY     the latest run finished; ``analysis_artifacts`` is current
 # ERROR     the latest run failed; previous artifacts are preserved and
 #           the safe failure reason is stored for display
+# RECOVERY_AVAILABLE  derived state (never stored): the process was
+#           restarted, no artifacts exist in memory, but validated
+#           metadata describes a previous successful analysis that can
+#           be re-run. It never claims artifacts exist.
 ANALYSIS_IDLE: str = "IDLE"
 ANALYSIS_RUNNING: str = "ANALYZING"
 ANALYSIS_READY: str = "READY"
 ANALYSIS_ERROR: str = "ERROR"
+ANALYSIS_RECOVERY_AVAILABLE: str = "RECOVERY_AVAILABLE"
 
 _ANALYSIS_STATUSES: frozenset[str] = frozenset(
-    {ANALYSIS_IDLE, ANALYSIS_RUNNING, ANALYSIS_READY, ANALYSIS_ERROR}
+    {
+        ANALYSIS_IDLE,
+        ANALYSIS_RUNNING,
+        ANALYSIS_READY,
+        ANALYSIS_ERROR,
+        ANALYSIS_RECOVERY_AVAILABLE,
+    }
 )
 
 
 def get_analysis_status() -> str:
-    """Return the current analysis lifecycle status (default IDLE)."""
+    """Return the current analysis lifecycle status (default IDLE).
+
+    ``RECOVERY_AVAILABLE`` is derived, never stored: it applies only
+    while the session is genuinely IDLE with no artifacts in memory,
+    and only when validated restart-recovery metadata references a
+    dataset that can still be loaded. A stale or deleted dataset falls
+    back to plain IDLE.
+    """
     status = st.session_state.get("analysis_status", ANALYSIS_IDLE)
-    return status if status in _ANALYSIS_STATUSES else ANALYSIS_IDLE
+    if status not in _ANALYSIS_STATUSES:
+        return ANALYSIS_IDLE
+    if status != ANALYSIS_IDLE:
+        return status
+    if _recovery_offer_applicable():
+        return ANALYSIS_RECOVERY_AVAILABLE
+    return ANALYSIS_IDLE
+
+
+def _get_recovery_context() -> dict | None:
+    """Return the validated recovery context, checked once per session.
+
+    The result (which may be ``None`` after a rejected/corrupt sidecar)
+    is memoized in session state so reruns never re-read the file, and
+    it is invalidated whenever a new analysis begins or completes.
+    """
+    if "recovery_context_cache" in st.session_state:
+        return st.session_state.recovery_context_cache
+    from app import orchestrator
+
+    context = orchestrator.load_recovery_context()
+    st.session_state.recovery_context_cache = context
+    if context is not None:
+        log_event(
+            logger,
+            "recovery_available",
+            dataset=context.get("dataset_name"),
+            source=context.get("source"),
+        )
+    return context
+
+
+def _recovery_offer_applicable() -> bool:
+    """True when IDLE + artifact-free + a reloadable previous analysis."""
+    artifacts = st.session_state.get("analysis_artifacts")
+    if artifacts is not None:
+        return False
+    context = _get_recovery_context()
+    if context is None:
+        return False
+    from app import orchestrator
+
+    try:
+        return orchestrator.recovery_dataset_available(context)
+    except Exception:  # noqa: BLE001 - recovery must never break status
+        return False
 
 
 def begin_analysis() -> None:
     """Mark a pipeline run as started (before the expensive work)."""
     st.session_state.analysis_status = ANALYSIS_RUNNING
     st.session_state.analysis_error = None
+    # A fresh run supersedes any recovery decision made earlier.
+    st.session_state.recovery_context_cache = None
 
 
 def complete_analysis(artifacts) -> None:
-    """Store the fresh artifacts and mark the analysis READY."""
+    """Store the fresh artifacts and mark the analysis READY.
+
+    The lightweight restart-recovery sidecar is refreshed so a future
+    process restart can offer to re-run this same analysis. Sidecar
+    bookkeeping is best effort and never affects the lifecycle.
+    """
     st.session_state.analysis_artifacts = artifacts
     st.session_state.analysis_status = ANALYSIS_READY
     st.session_state.analysis_error = None
+    st.session_state.recovery_context_cache = None
+    try:
+        from app import orchestrator
+
+        parameters = (artifacts.pack.get("parameters") or {}) if getattr(artifacts, "pack", None) else {}
+        orchestrator.save_recovery_context(
+            artifacts.dataset_name, str(parameters.get("sensitivity", "medium"))
+        )
+    except Exception as exc:  # noqa: BLE001 - recovery is never critical
+        logger.warning("recovery_save_failed error_type=%s", type(exc).__name__)
 
 
 def fail_analysis(message: str) -> None:
@@ -106,6 +190,24 @@ DATABASE_UI_ERROR: str = (
     "Please retry; if the problem persists, restart the application."
 )
 
+# Longest user-facing message rendered from a typed error. Curated
+# OpsPilot messages are far shorter; the cap only bounds worst cases.
+_MAX_UI_MESSAGE_LENGTH = 300
+
+# Absolute-path-like tokens (Windows drive paths, UNC paths, and POSIX
+# absolute paths) are redacted from typed error messages before render.
+_PATH_TOKEN_PATTERN = re.compile(
+    r"(?:[A-Za-z]:[\\/][^\s'\"<>|]*|\\\\[^\s'\"<>]+|/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)"
+)
+
+
+def _sanitize_user_message(message: str) -> str:
+    """Redact path-like tokens and bound the length of a UI message."""
+    sanitized = _PATH_TOKEN_PATTERN.sub("<path>", message)
+    if len(sanitized) > _MAX_UI_MESSAGE_LENGTH:
+        sanitized = sanitized[:_MAX_UI_MESSAGE_LENGTH].rstrip() + "…"
+    return sanitized
+
 
 def run_page(title: str, subtitle: str | None, render: Callable[[], None]) -> None:
     """Render one page inside the shared error boundary."""
@@ -117,8 +219,10 @@ def run_page(title: str, subtitle: str | None, render: Callable[[], None]) -> No
     except DatabaseError:
         st.error(DATABASE_UI_ERROR)
     except OpsPilotError as exc:
-        st.error(f"**{type(exc).__name__}** - {exc}")
+        st.error(f"**{type(exc).__name__}** - {_sanitize_user_message(str(exc))}")
     except Exception as exc:  # noqa: BLE001 - final user-facing boundary
+        log_event(logger, "unexpected_error", error_type=type(exc).__name__, page=title)
+        logger.debug("unexpected page failure", exc_info=True)
         st.error(f"Unexpected application error ({type(exc).__name__}). Please retry.")
 
 
@@ -138,6 +242,9 @@ def require_artifacts():
       keeps the previous valid results visible with a warning).
     * ``ERROR``     — the last attempt failed; show the reason and how
       to retry when no previous results exist.
+    * ``RECOVERY_AVAILABLE`` — a previous successful analysis was found
+      after a restart; offer to reload/re-run it. Artifacts are never
+      fabricated: nothing is rendered as current results.
     * ``IDLE``      — genuinely nothing analyzed yet; actionable hint.
     """
     from app.orchestrator import AnalysisArtifacts
@@ -164,7 +271,24 @@ def require_artifacts():
                 st.caption(f"Reason: {reason}")
         return artifacts
 
-    if get_analysis_status() == ANALYSIS_ERROR:
+    status = get_analysis_status()
+
+    if status == ANALYSIS_RECOVERY_AVAILABLE:
+        context = _get_recovery_context() or {}
+        st.info(
+            "**Previous analysis found** — the application was restarted "
+            "since the last successful run, so its interactive results "
+            "are no longer in memory.\n\n"
+            f"Last completed analysis: `{context.get('dataset_name')}` "
+            f"(sensitivity `{context.get('sensitivity')}`, finished "
+            f"{context.get('completed_at')}).\n\n"
+            "To restore it: open **Data** in the sidebar, load the same "
+            "dataset, then press *Run / Refresh Analysis* on the "
+            "**Analytics** page."
+        )
+        return None
+
+    if status == ANALYSIS_ERROR:
         st.error(
             "**Analysis could not be completed.** Open **Analytics** and "
             "press *Run / Refresh Analysis* to try again."

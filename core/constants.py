@@ -43,3 +43,16 @@ UPLOAD_ROW_ADVISORY = 500_000
 # the previously staged file deterministically (uploads are transient
 # staging copies and are never part of the audit store).
 UPLOAD_DUPLICATE_POLICY = "replace"
+
+# --- Restart recovery (Phase 10B) --------------------------------------------
+
+# Detection sensitivities accepted by the analysis pipeline.
+VALID_SENSITIVITIES: tuple[str, ...] = ("low", "medium", "high")
+
+# Schema version of the restart-recovery metadata sidecar. Contexts with
+# a different version are rejected (fail-safe) rather than interpreted.
+RECOVERY_CONTEXT_VERSION = 1
+
+# Filename of the recovery metadata sidecar, stored inside the
+# gitignored ``data/uploads/`` runtime directory.
+RECOVERY_CONTEXT_FILENAME = "recovery_context.json"

@@ -344,7 +344,12 @@ def record_plan(engine: Engine, plan: object, *, recorded_at: object = None) -> 
                 )
             return int(row.id)
     except IntegrityError as exc:
-        raise DatabaseError(f"failed to persist recommendation plan: {exc}") from exc
+        # Raw driver text (SQL fragments, constraint details) is never
+        # embedded in typed messages; the cause chain preserves the
+        # original error for internal debugging.
+        raise DatabaseError(
+            "failed to persist recommendation plan (integrity constraint)"
+        ) from exc
 
 
 def record_recommendation(
@@ -391,7 +396,12 @@ def record_recommendation(
             session.flush()
             return int(row.id)
     except IntegrityError as exc:
-        raise DatabaseError(f"failed to persist recommendation snapshot: {exc}") from exc
+        # Raw driver text (SQL fragments, constraint details) is never
+        # embedded in typed messages; the cause chain preserves the
+        # original error for internal debugging.
+        raise DatabaseError(
+            "failed to persist recommendation snapshot (integrity constraint)"
+        ) from exc
 
 
 def record_review_event(engine: Engine, event: object) -> int:
@@ -426,8 +436,8 @@ def record_review_event(engine: Engine, event: object) -> int:
             session.add(row)
             session.flush()
             return int(row.id)
-    except IntegrityError as exc:
-        raise DatabaseError(f"failed to persist review event: {exc}") from exc
+    except IntegrityError:
+        raise DatabaseError("failed to persist review event (integrity constraint)") from None
 
 
 def record_review(
@@ -487,8 +497,8 @@ def record_review(
             session.add(evt_row)
             session.flush()
             return int(rec_row.id), int(evt_row.id)
-    except IntegrityError as exc:
-        raise DatabaseError(f"failed to persist review outcome: {exc}") from exc
+    except IntegrityError:
+        raise DatabaseError("failed to persist review outcome (integrity constraint)") from None
 
 
 # --- read path (deterministic queries) ----------------------------------------------------
