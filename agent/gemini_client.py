@@ -8,6 +8,8 @@ directly. The client:
   ``core.config.get_gemini_api_key`` (never hard-coded, never logged),
 * raises the project's :class:`ConfigurationError` when no key exists,
 * requests JSON output at ``temperature=0`` for deterministic settings,
+* bounds every request with an explicit HTTP timeout so failures are
+  always finite (the SDK default is 10 minutes), and
 * returns plain response text for the investigator to validate.
 
 Tests never use this class against the network; they inject fake clients
@@ -19,7 +21,18 @@ from __future__ import annotations
 from core.config import get_gemini_api_key
 from core.exceptions import AgentError, ConfigurationError
 
-DEFAULT_GEMINI_MODEL: str = "gemini-2.5-flash"
+# Verified live against the production Gemini API (google-genai 2.19.0,
+# JSON mode, temperature=0): ``gemini-2.5-flash`` answers 404 NOT_FOUND —
+# "no longer available to new users" — which made every investigation
+# fail at the client boundary. ``gemini-3.6-flash`` is the replacement
+# recommended by that same API response and confirmed working.
+DEFAULT_GEMINI_MODEL: str = "gemini-3.6-flash"
+
+# Hard ceiling for one generate_content HTTP round trip, in milliseconds.
+# Keeps worst-case failure bounded: with the investigator's retry budget
+# (default 3 attempts) a fully broken endpoint surfaces within minutes,
+# never hangs a Streamlit session indefinitely.
+GEMINI_REQUEST_TIMEOUT_MS: int = 120_000
 
 
 class GeminiNarratorClient:
@@ -51,7 +64,10 @@ class GeminiNarratorClient:
                 "The google-genai package is not installed; run "
                 "'pip install -r requirements.txt'."
             ) from exc
-        self._client = genai.Client(api_key=resolved)
+        self._client = genai.Client(
+            api_key=resolved,
+            http_options={"timeout": GEMINI_REQUEST_TIMEOUT_MS},
+        )
         self._config_factory = genai_types.GenerateContentConfig
 
     def generate_json(self, prompt: str) -> str:
