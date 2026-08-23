@@ -209,11 +209,16 @@ def _sanitize_user_message(message: str) -> str:
     return sanitized
 
 
-def run_page(title: str, subtitle: str | None, render: Callable[[], None]) -> None:
-    """Render one page inside the shared error boundary."""
-    st.title(title)
-    if subtitle:
-        st.caption(subtitle)
+def run_page(title: str, subtitle: str | None, render: Callable[[], None],
+             *, icon: str = "dashboard", eyebrow: str | None = None) -> None:
+    """Render one page inside the shared error boundary.
+
+    The hero header is presentation-only (Phase 11); the error boundary
+    semantics below are unchanged from Phase 8/10B.
+    """
+    from app.ui.pageframe import render_page_frame
+
+    render_page_frame(icon, eyebrow or title.upper(), title, subtitle)
     try:
         render()
     except DatabaseError:
@@ -252,7 +257,7 @@ def require_artifacts():
     if get_analysis_status() == ANALYSIS_RUNNING:
         dataset = st.session_state.get("dataset_name") or "the selected dataset"
         st.info(
-            f"⏳ **Analysis in progress** — OpsPilot is processing `{dataset}`.\n\n"
+            f"**Analysis in progress** — OpsPilot is processing `{dataset}`.\n\n"
             "Deterministic operational analysis is running. Results appear "
             "automatically on every page once it completes."
         )
@@ -282,10 +287,13 @@ def require_artifacts():
             f"Last completed analysis: `{context.get('dataset_name')}` "
             f"(sensitivity `{context.get('sensitivity')}`, finished "
             f"{context.get('completed_at')}).\n\n"
-            "To restore it: open **Data** in the sidebar, load the same "
-            "dataset, then press *Run / Refresh Analysis* on the "
-            "**Analytics** page."
+            "To restore it: open the **Data** workspace via the button "
+            "below, load the same dataset, then press *Run / Refresh "
+            "Analysis* on the **Analytics** page. Nothing is re-run "
+            "automatically."
         )
+        st.markdown(_recovery_card_html(context), unsafe_allow_html=True)
+        _render_recovery_cta()
         return None
 
     if status == ANALYSIS_ERROR:
@@ -300,7 +308,59 @@ def require_artifacts():
 
     st.warning(
         "No analyzed dataset yet. Load and validate a dataset on the "
-        "**Data** page in the sidebar, then run the analysis from the "
-        "**Analytics** page."
+        "**Data** page, then run the analysis from the **Analytics** page."
     )
     return None
+
+
+# --- recovery CTA -----------------------------------------------------------------------------------
+#
+# The restart-recovery notice must never depend exclusively on the
+# sidebar being visible: it renders its own card and a native
+# ``st.page_link`` CTA that routes to the Data workspace. Analysis is
+# NEVER re-run automatically; the user explicitly chooses to restore.
+
+RECOVERY_CTA_PAGE: str = "pages/data.py"
+
+
+def _render_recovery_cta() -> None:
+    """Native CTA routing to the Data workspace.
+
+    ``st.page_link`` resolves the target through the multipage registry,
+    which exists in the served app but not in bare-script contexts
+    (Streamlit AppTest ``from_function``/``from_file``). The recovery
+    notice is the last-resort fallback UI, so it degrades to the card
+    alone with a warning instead of raising.
+    """
+    try:
+        st.page_link(RECOVERY_CTA_PAGE, label="Open Data Workspace",
+                     icon=":material/database:")
+    except KeyError:
+        logger.warning("recovery_cta_unavailable_no_page_registry")
+
+
+def _recovery_card_html(context: dict) -> str:
+    """Markup for the SESSION RESTORE card shown when artifacts are missing."""
+    from app.ui.icons import escape_label
+
+    rows = [
+        ("Dataset", context.get("dataset_name")),
+        ("Sensitivity", context.get("sensitivity")),
+        ("Completed", context.get("completed_at")),
+    ]
+    body = "".join(
+        f"<dt>{escape_label(label)}</dt>"
+        f"<dd>{escape_label(value) if value is not None else '—'}</dd>"
+        for label, value in rows
+    )
+    return (
+        "<div class='ops-card ops-recovery-card' style='border-color:"
+        "rgba(91,140,255,.4)'>"
+        "<div class='ops-metric-label'>SESSION RESTORE</div>"
+        "<div style='font-weight:640;margin:.25rem 0 .5rem'>"
+        "Previous analysis found</div>"
+        f"<dl class='ops-kv'>{body}</dl>"
+        "<div class='ops-card-sub' style='margin-top:.55rem'>Results are not "
+        "currently loaded in this session.</div>"
+        "</div>"
+    )

@@ -636,6 +636,57 @@ def test_client_construction_offline_with_explicit_key():
     assert callable(getattr(client, "generate_json", None))
 
 
+# --- Production model contract ----------------------------------------------------------------------
+
+
+class _FakeConfig:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+def test_default_model_is_the_verified_flash_generation():
+    # gemini-2.5-flash returns 404 NOT_FOUND ("no longer available to
+    # new users"); gemini-3.6-flash was verified live with JSON mode.
+    assert gemini_client_module.DEFAULT_GEMINI_MODEL == "gemini-3.6-flash"
+    assert "gemini-2.5" not in gemini_client_module.DEFAULT_GEMINI_MODEL
+
+
+def test_requests_carry_bounded_http_timeout():
+    assert isinstance(
+        gemini_client_module.GEMINI_REQUEST_TIMEOUT_MS, int
+    )
+    assert 0 < gemini_client_module.GEMINI_REQUEST_TIMEOUT_MS <= 600_000
+
+
+def test_generate_json_uses_default_model_and_json_mode():
+    captured = {}
+
+    class _RecordingInner:
+        def __init__(self):
+            self.models = self
+
+        def generate_content(self, *, model, contents, config):
+            captured["model"] = model
+            captured["contents"] = contents
+            captured["config"] = config
+
+            class _R:
+                text = "{}"
+
+            return _R()
+
+    outer = GeminiNarratorClient.__new__(GeminiNarratorClient)
+    outer._client = _RecordingInner()
+    outer._model = gemini_client_module.DEFAULT_GEMINI_MODEL
+    outer._config_factory = _FakeConfig
+
+    text = outer.generate_json("prompt-body")
+    assert text == "{}"
+    assert captured["model"] == "gemini-3.6-flash"
+    assert captured["config"].temperature == 0.0
+    assert captured["config"].response_mime_type == "application/json"
+
+
 def test_no_hardcoded_credentials_in_agent_sources():
     agent_dir = PROJECT_ROOT / "agent"
     for source_path in agent_dir.glob("*.py"):

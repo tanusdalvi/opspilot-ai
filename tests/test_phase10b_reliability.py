@@ -10,6 +10,7 @@ behavior remain intact. Also runs the offline demo smoke script.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -310,12 +311,23 @@ class TestDemoSmokeScript:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         script = PROJECT_ROOT / "scripts" / "demo_smoke.py"
         assert script.is_file()
+        # Gemini isolation contract: the subprocess must exercise the
+        # deterministic no-AI path even when the developer's .env defines
+        # GEMINI_API_KEY. core.config loads .env at import time via
+        # load_dotenv(override=False), so merely REMOVING the variable would
+        # let dotenv re-import the real key inside the child. Seeding an
+        # EMPTY value pins the state instead: dotenv never overrides existing
+        # variables, and get_gemini_api_key() treats "" as not configured.
+        # The secret value itself is never read, printed, or persisted here.
+        child_env = os.environ.copy()
+        child_env["GEMINI_API_KEY"] = ""
         result = subprocess.run(
             [sys.executable, str(script)],
             capture_output=True,
             text=True,
             timeout=600,
             cwd=str(PROJECT_ROOT),
+            env=child_env,
         )
         output = result.stdout
         assert result.returncode == 0, output + result.stderr
