@@ -5,6 +5,7 @@ import {
   Activity,
   Archive,
   BarChart3,
+  Brain,
   CheckCircle2,
   Compass,
   Database,
@@ -61,6 +62,7 @@ export function CommandPalette({
     ...themeCommands,
     ...[
       { path: "/", label: "Open Overview", icon: Eye },
+      { path: "/investigate", label: "Open Investigation Center", icon: Brain },
       { path: "/data", label: "Open Data", icon: Database },
       { path: "/explorer", label: "Open Data Explorer", icon: Compass },
       { path: "/analytics", label: "Open Analytics", icon: BarChart3 },

@@ -21,6 +21,7 @@ const Analytics = lazy(() => import("./pages/Analytics"));
 const Explorer = lazy(() => import("./pages/Explorer"));
 const Recommendations = lazy(() => import("./pages/Recommendations"));
 const Anomalies = lazy(() => import("./pages/Anomalies"));
+const InvestigationCenter = lazy(() => import("./pages/InvestigationCenter"));
 const History = lazy(() => import("./pages/History"));
 
 function RouteFallback() {
@@ -130,8 +131,18 @@ export default function App() {
                     path="/anomalies"
                     element={
                       <Suspense fallback={<RouteFallback />}>
-                        <PageBoundary name="Findings & Signals">
+                        <PageBoundary name="Findings">
                           <Anomalies />
+                        </PageBoundary>
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="/investigate"
+                    element={
+                      <Suspense fallback={<RouteFallback />}>
+                        <PageBoundary name="Investigation Center">
+                          <InvestigationCenter />
                         </PageBoundary>
                       </Suspense>
                     }

@@ -93,6 +93,15 @@ SEVERITY_CRITICAL_MIN_SCORE: float = 85.0
 SEVERITY_HIGH_MIN_SCORE: float = 70.0
 SEVERITY_MEDIUM_MIN_SCORE: float = 50.0
 
+# Isolation Forest configuration.
+RULE_ISOLATION_FOREST: str = "isolation_forest"
+# Fraction of expected outliers — lower = fewer flagged anomalies.
+IFOREST_CONTAMINATION: float = 0.05
+# Minimum rows required to run Isolation Forest (need enough data for fit).
+IFOREST_MIN_ROWS: int = 30
+# Random state for reproducibility.
+IFOREST_RANDOM_STATE: int = 42
+
 # Hard cap on the number of anomalies returned by detect_anomalies.
 # Hourly or sub-daily data can generate thousands of flagged points;
 # downstream explain_anomalies is O(n) per anomaly with O(n) inner
@@ -314,6 +323,101 @@ def _detect_entity_anomalies_core(
     return anomalies
 
 
+# --- Isolation Forest detector ------------------------------------------------
+
+
+def _detect_isolation_forest(
+    work: pd.DataFrame,
+    metrics: list[str],
+    sensitivity: str,
+) -> list[dict[str, object]]:
+    """Detect multivariate anomalies using scikit-learn Isolation Forest.
+
+    Runs a single Isolation Forest over the daily aggregated values of all
+    available metrics simultaneously, capturing anomalies that individual
+    univariate detectors miss (e.g. a date where revenue is high but cost
+    is also unusually high — a margin event).
+
+    Each flagged date is decomposed per-metric so the output records are
+    compatible with the existing finding/compression pipeline.
+    """
+    try:
+        from sklearn.ensemble import IsolationForest  # type: ignore[import-untyped]
+    except ImportError:
+        return []
+
+    cols = [m for m in metrics if m in work.columns]
+    if not cols:
+        return []
+
+    daily = work.groupby("date", sort=True)[cols].sum().reset_index()
+    if len(daily) < IFOREST_MIN_ROWS:
+        return []
+
+    feature_matrix = daily[cols].values
+    # Scale contamination by sensitivity: high → more flagged, low → fewer
+    contamination_map = {"low": 0.02, "medium": IFOREST_CONTAMINATION, "high": 0.08}
+    contam = contamination_map.get(sensitivity, IFOREST_CONTAMINATION)
+
+    clf = IsolationForest(
+        contamination=contam,
+        random_state=IFOREST_RANDOM_STATE,
+        n_estimators=100,
+    )
+    predictions = clf.fit_predict(feature_matrix)
+    scores_raw = -clf.decision_function(feature_matrix)  # higher = more anomalous
+
+    anomalies: list[dict[str, object]] = []
+    threshold = SENSITIVITY_THRESHOLDS[sensitivity]
+
+    for idx, pred in enumerate(predictions):
+        if pred != -1:
+            continue  # Not an outlier
+
+        date_raw = daily.iloc[idx]["date"]
+        date_val = str(date_raw)[:10] if hasattr(date_raw, "strftime") else str(date_raw)[:10]
+        raw_score = float(scores_raw[idx])
+        # Normalize to 0-100 scale: map raw score to severity
+        # raw scores typically range from -0.5 to 0.5; we normalize
+        normalized = min(100.0, max(0.0, (raw_score + 0.5) * 100))
+        # Determine which metric is most anomalous for this date
+        for col in cols:
+            value = float(daily.iloc[idx][col])
+            # Compare against column mean/std across all dates
+            col_mean = float(daily[col].mean())
+            col_std = float(daily[col].std())
+            if col_std == 0:
+                continue
+            z = (value - col_mean) / col_std
+            if abs(z) < threshold * 0.8:  # Slightly relaxed for multivariate context
+                continue
+
+            deviation = _deviation_pct(value, col_mean)
+            score = min(100.0, 100.0 * abs(z) / Z_SCORE_CAP)
+            anomalies.append(
+                {
+                    "type": "daily_spike" if z > 0 else "daily_drop",
+                    "scope": "daily",
+                    "metric": col,
+                    "entity": None,
+                    "date": date_val,
+                    "value": _round(value),
+                    "expected_value": _round(col_mean),
+                    "deviation_pct": _round(deviation),
+                    "score": _round(score),
+                    "severity": _classify_severity(score),
+                    "rule": RULE_ISOLATION_FOREST,
+                    "details": {
+                        "z": _round(z),
+                        "iforest_score": _round(raw_score),
+                        "method": "isolation_forest",
+                    },
+                }
+            )
+
+    return anomalies
+
+
 def detect_metric_anomalies(
     df: pd.DataFrame, metric: str, *, sensitivity: str = "medium"
 ) -> list[dict[str, object]]:
@@ -483,6 +587,10 @@ def detect_anomalies(
             combined.extend(
                 _detect_entity_anomalies_core(work, "product", metric)
             )
+
+    # Multivariate Isolation Forest detection (captures cross-metric anomalies)
+    iforest_anomalies = _detect_isolation_forest(work, metrics, sensitivity)
+    combined.extend(iforest_anomalies)
 
     combined.sort(key=_aggregate_sort_key)
 

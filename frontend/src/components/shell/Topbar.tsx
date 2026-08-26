@@ -6,6 +6,7 @@ import { Badge } from "../ui/Primitives";
 
 const TITLES: [RegExp, string, string][] = [
   [/^\/$/, "Overview", "What needs your attention"],
+  [/^\/investigate/, "Investigation Center", "Ask questions about your data"],
   [/^\/data/, "Data Workspace", "Load and prepare datasets"],
   [/^\/explorer/, "Data Explorer", "Explore your dataset visually"],
   [/^\/analytics/, "Analytics", "Trends, comparisons, and drill-downs"],

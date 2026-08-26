@@ -47,6 +47,7 @@ from backend.api.sessions import (
     run_analysis_sync,
     start_investigation_sync,
 )
+from services.tool_registry import get_available_tools, execute_tools
 
 logger = get_logger(__name__)
 
@@ -135,6 +136,11 @@ class ReviewRequest(BaseModel):
     decision: str
     reviewer_id: str
     comment: str | None = None
+
+
+class InvestigateRequest(BaseModel):
+    question: str
+    tools: list[str] | None = None  # None = auto-select based on question
 
 
 # --- system / health ---------------------------------------------------------------------------------
@@ -418,6 +424,185 @@ def investigation_status(
         "investigation_error": session.investigation_error,
         "result": result,
         "gemini_model": DEFAULT_GEMINI_MODEL,
+    }
+
+
+# --- Investigation Center (deterministic tool-based investigation) -------------------------
+
+
+def _select_tools_for_question(question: str, available_names: list[str]) -> list[str]:
+    """Select relevant tools based on the user's question keywords."""
+    q = question.lower()
+    selected: list[str] = []
+
+    # Always include summary for context
+    if "get_sales_summary" in available_names:
+        selected.append("get_sales_summary")
+
+    # Keyword-based tool selection
+    keyword_tool_map = {
+        "product": "get_product_performance",
+        "region": "get_region_performance",
+        "area": "get_region_performance",
+        "geographic": "get_region_performance",
+        "period": "get_period_comparison",
+        "trend": "get_trend_analysis",
+        "direction": "get_trend_analysis",
+        "cost": "get_cost_ratio_analysis",
+        "margin": "get_cost_ratio_analysis",
+        "profit": "get_cost_ratio_analysis",
+        "lead time": "get_lead_time_analysis",
+        "delivery": "get_lead_time_analysis",
+        "fulfil": "get_lead_time_analysis",
+        "fulfill": "get_lead_time_analysis",
+        "anomal": "detect_anomalies",
+        "unusual": "detect_anomalies",
+        "spike": "detect_anomalies",
+        "drop": "detect_anomalies",
+        "outlier": "detect_anomalies",
+    }
+
+    for keyword, tool_name in keyword_tool_map.items():
+        if keyword in q and tool_name in available_names and tool_name not in selected:
+            selected.append(tool_name)
+
+    # If no specific tools matched, include trend and period comparison
+    if len(selected) <= 1:
+        for fallback in ("get_trend_analysis", "get_period_comparison", "detect_anomalies"):
+            if fallback in available_names and fallback not in selected:
+                selected.append(fallback)
+
+    return selected
+
+
+@app.post("/api/investigate")
+def investigate(body: InvestigateRequest,
+                session: WorkspaceSession = Depends(session_dependency)) -> dict[str, Any]:
+    """Deterministic tool-based investigation. Runs analytical tools against
+    the active dataset and returns structured evidence without requiring AI."""
+    if session.df is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No dataset is loaded. Load a dataset before investigating.",
+        )
+    if session.artifacts is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Run analysis before investigating. Click 'Run Analysis' first.",
+        )
+
+    df = session.df
+    available = get_available_tools(df)
+    available_names = [t.name for t in available]
+
+    # Select tools: user-specified or auto-selected based on question
+    tool_names = body.tools if body.tools else _select_tools_for_question(body.question, available_names)
+
+    # Execute tools
+    tool_results = execute_tools(tool_names, df, sensitivity="medium")
+
+    # Build investigation evidence
+    evidence_items: list[dict[str, Any]] = []
+    for tool_name, result in tool_results.items():
+        if "error" in result:
+            evidence_items.append({
+                "tool": tool_name,
+                "status": "error",
+                "error": result["error"],
+            })
+        else:
+            evidence_items.append({
+                "tool": tool_name,
+                "status": "success",
+                "data": result,
+            })
+
+    # Build the deterministic investigation plan
+    tool_descriptions = {t.name: t.description for t in available}
+    plan = {
+        "question": body.question,
+        "selected_tools": [
+            {"name": n, "description": tool_descriptions.get(n, "")}
+            for n in tool_names
+        ],
+        "available_tools": [
+            {"name": t.name, "description": t.description, "category": t.category}
+            for t in available
+        ],
+    }
+
+    # Synthesize a deterministic conclusion from the evidence
+    summary_parts: list[str] = []
+    for item in evidence_items:
+        if item["status"] == "success":
+            data = item["data"]
+            tool_name = item["tool"]
+            if tool_name == "get_sales_summary" and "metrics" in data:
+                m = data["metrics"]
+                if "revenue" in m:
+                    summary_parts.append(
+                        f"Total revenue: ${m['revenue']['total']:,.0f} "
+                        f"(${m['revenue']['daily_average']:,.0f}/day avg)"
+                    )
+                if "lead_time_days" in m:
+                    summary_parts.append(
+                        f"Average lead time: {m['lead_time_days']['average']:.1f} days "
+                        f"(p95: {m['lead_time_days']['p95']:.1f} days)"
+                    )
+            elif tool_name == "get_trend_analysis" and "trends" in data:
+                for metric, trend in data["trends"].items():
+                    summary_parts.append(
+                        f"{metric}: {trend['direction']} "
+                        f"({trend['change_pct']:+.1f}% period-over-period)"
+                    )
+            elif tool_name == "get_cost_ratio_analysis":
+                if "trend" in data:
+                    summary_parts.append(
+                        f"Cost ratio: {data.get('first_half_cost_ratio', '?')}% → "
+                        f"{data.get('second_half_cost_ratio', '?')}% "
+                        f"({data['trend']})"
+                    )
+            elif tool_name == "get_lead_time_analysis" and "trend" in data:
+                t = data["trend"]
+                summary_parts.append(
+                    f"Lead time trend: {t['first_half_mean']:.1f} → "
+                    f"{t['second_half_mean']:.1f} days "
+                    f"({t['change_pct']:+.1f}%)"
+                )
+            elif tool_name == "detect_anomalies":
+                summary_parts.append(
+                    f"Anomalies detected: {data.get('total_anomalies', 0)} "
+                    f"across {len(data.get('metrics_analyzed', []))} metrics"
+                )
+            elif tool_name == "get_product_performance" and "products" in data:
+                for p in data["products"]:
+                    summary_parts.append(
+                        f"Product '{p['product']}': "
+                        f"{p.get('units_sold', {}).get('total', 0):,} units, "
+                        f"${p.get('revenue', {}).get('total', 0):,.0f} revenue"
+                    )
+            elif tool_name == "get_region_performance" and "regions" in data:
+                for r in data["regions"]:
+                    summary_parts.append(
+                        f"Region '{r['region']}': "
+                        f"${r.get('revenue', {}).get('total', 0):,.0f} revenue, "
+                        f"avg lead time {r.get('lead_time_days', {}).get('average', 0):.1f} days"
+                    )
+
+    conclusion = (
+        "Investigation of: " + body.question + "\n\n"
+        + "\n".join(f"• {part}" for part in summary_parts)
+        if summary_parts
+        else "The analytical tools returned no results for this question."
+    )
+
+    return {
+        "status": "complete",
+        "plan": plan,
+        "evidence": evidence_items,
+        "conclusion": conclusion,
+        "tools_available": len(available),
+        "tools_executed": len(tool_names),
     }
 
 

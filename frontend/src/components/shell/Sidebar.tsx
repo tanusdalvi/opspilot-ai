@@ -3,6 +3,7 @@ import {
   Activity,
   Archive,
   BarChart3,
+  Brain,
   CheckCircle2,
   ChevronLeft,
   ClipboardList,
@@ -36,6 +37,7 @@ const GROUPS: { name: string; items: NavItem[] }[] = [
   {
     name: "Intelligence",
     items: [
+      { to: "/investigate", label: "Investigate", icon: Brain },
       { to: "/anomalies", label: "Findings", icon: Activity },
       { to: "/evidence", label: "Evidence", icon: FileSearch },
     ],
