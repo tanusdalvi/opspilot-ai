@@ -51,6 +51,33 @@ export function statusTone(status: string): Tone {
   }
 }
 
+const STATUS_LABELS: Record<string, string> = {
+  APPROVED: "Approved",
+  REJECTED: "Rejected",
+  CHANGES_REQUESTED: "Changes Requested",
+  PENDING: "Pending",
+  EXPIRED: "Expired",
+};
+
+/** Human label for a recommendation/review lifecycle status. */
+export function statusLabel(status: unknown): string {
+  const key = String(status ?? "").toUpperCase();
+  return STATUS_LABELS[key] ?? metricTitle(String(status ?? ""));
+}
+
+const PRIORITY_LABELS: Record<string, string> = {
+  CRITICAL: "Critical",
+  HIGH: "High",
+  MEDIUM: "Medium",
+  LOW: "Low",
+};
+
+/** Human label for a recommendation priority band. */
+export function priorityLabel(priority: unknown): string {
+  const key = String(priority ?? "").toUpperCase();
+  return PRIORITY_LABELS[key] ?? metricTitle(String(priority ?? ""));
+}
+
 /** Human title for a KPI/metric key ("total_revenue" -> "Total Revenue"). */
 export function metricTitle(key: string): string {
   return key

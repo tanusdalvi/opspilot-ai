@@ -46,6 +46,14 @@ DEFAULT_PERFORMER_LIMIT: int = 5
 # Decimal places used for every rounded presentation value.
 ROUNDING_DECIMALS: int = 2
 
+# Canonical numeric metrics and their preferred display direction.
+_METRIC_DIRECTION: dict[str, str] = {
+    "units_sold": "higher_is_better",
+    "revenue": "higher_is_better",
+    "cost": "lower_is_better",
+    "lead_time_days": "lower_is_better",
+}
+
 
 # --- Private helpers --------------------------------------------------------
 
@@ -129,14 +137,18 @@ def _parse_date_column(series: pd.Series) -> pd.Series:
 def _prepare_operational_data(df: pd.DataFrame) -> pd.DataFrame:
     """Validate ``df`` and return an independent normalized working copy.
 
-    The working copy contains exactly the required columns with the date
+    The working copy contains the available canonical columns with the date
     column parsed to datetimes and numeric columns cast to ``float``.
-    The caller's DataFrame is never touched.
+    The caller's DataFrame is never touched.  Only columns present in the
+    input are carried forward — a missing canonical column does not cause
+    a crash.
     """
     _require_usable_frame(df)
-    work = df[list(REQUIRED_COLUMNS)].copy()
-    work["date"] = _parse_date_column(work["date"])
-    for column in sorted(NUMERIC_COLUMNS):
+    available = [col for col in REQUIRED_COLUMNS if col in df.columns]
+    work = df[available].copy()
+    if "date" in work.columns:
+        work["date"] = _parse_date_column(work["date"])
+    for column in sorted(NUMERIC_COLUMNS & set(work.columns)):
         values = work[column].astype(float)
         if not bool(np.isfinite(values.to_numpy()).all()):
             raise DataValidationError(
@@ -159,18 +171,39 @@ def _normalize_units_column(series: pd.Series) -> pd.Series:
 
 
 def _aggregate_by(work: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
-    """Aggregate sums and lead-time means grouped by ``keys``."""
-    grouped = work.groupby(keys, sort=False, observed=True).agg(
-        units_sold=("units_sold", "sum"),
-        revenue=("revenue", "sum"),
-        cost=("cost", "sum"),
-        average_lead_time_days=("lead_time_days", "mean"),
-    )
+    """Aggregate sums and lead-time means grouped by ``keys``.
+
+    Only columns that actually exist in *work* are aggregated.  Missing
+    canonical numeric columns are silently skipped so the function works
+    with partial schemas.
+    """
+    aggs: dict[str, tuple[str, str]] = {}
+    if "units_sold" in work.columns:
+        aggs["units_sold"] = ("units_sold", "sum")
+    if "revenue" in work.columns:
+        aggs["revenue"] = ("revenue", "sum")
+    if "cost" in work.columns:
+        aggs["cost"] = ("cost", "sum")
+    if "lead_time_days" in work.columns:
+        aggs["average_lead_time_days"] = ("lead_time_days", "mean")
+    grouped = work.groupby(keys, sort=False, observed=True).agg(**aggs)
     return grouped.reset_index()
 
 
 def _add_profit_columns(frame: pd.DataFrame) -> pd.DataFrame:
-    """Add ``profit`` and ``profit_margin_pct`` columns to an aggregate frame."""
+    """Add ``profit`` and ``profit_margin_pct`` columns to an aggregate frame.
+
+    Profit is only computed when both ``revenue`` and ``cost`` columns
+    exist **and** their combined total is non-zero.  When the totals are
+    both zero (e.g. synthesized constants) the columns are omitted so
+    downstream consumers never see meaningless profit values.
+    """
+    if "revenue" not in frame.columns or "cost" not in frame.columns:
+        return frame
+    total_revenue = float(frame["revenue"].sum())
+    total_cost = float(frame["cost"].sum())
+    if total_revenue == 0.0 and total_cost == 0.0:
+        return frame
     frame["profit"] = frame["revenue"] - frame["cost"]
     frame["profit_margin_pct"] = [
         _round(_safe_ratio(profit, revenue) * 100.0)
@@ -182,46 +215,57 @@ def _add_profit_columns(frame: pd.DataFrame) -> pd.DataFrame:
 def _performance_by_dimension(work: pd.DataFrame, dimension: str) -> pd.DataFrame:
     """Build the shared region/product performance table.
 
-    Sorted deterministically by revenue descending then entity name
-    ascending. Share percentages compare each group against the totals of
-    the whole dataset; zero totals yield ``0.0`` shares.
+    Sorted deterministically by the first available numeric metric
+    descending then entity name ascending.  Share percentages compare
+    each group against the totals of the whole dataset; zero totals
+    yield ``0.0`` shares.  Only columns that exist in the aggregated
+    frame are included in the output.
     """
     frame = _aggregate_by(work, [dimension])
     frame = _add_profit_columns(frame)
 
-    total_revenue = float(work["revenue"].sum())
-    total_units = float(work["units_sold"].sum())
-    frame["revenue_share_pct"] = [
-        _round(_safe_ratio(revenue, total_revenue) * 100.0)
-        for revenue in frame["revenue"]
+    # Determine the primary sort metric (first available numeric column).
+    _available_metrics = [
+        c for c in ("revenue", "units_sold", "cost", "average_lead_time_days")
+        if c in frame.columns
     ]
-    frame["units_share_pct"] = [
-        _round(_safe_ratio(units, total_units) * 100.0)
-        for units in frame["units_sold"]
-    ]
+    sort_metric = _available_metrics[0] if _available_metrics else dimension
 
-    frame["average_lead_time_days"] = frame["average_lead_time_days"].map(_round)
-    frame["revenue"] = frame["revenue"].map(_round)
-    frame["cost"] = frame["cost"].map(_round)
-    frame["profit"] = frame["profit"].map(_round)
-    frame["units_sold"] = _normalize_units_column(frame["units_sold"])
+    # Compute share percentages for available metrics.
+    _share_names = {"revenue": "revenue_share_pct", "units_sold": "units_share_pct"}
+    for metric, share_col in _share_names.items():
+        if metric in frame.columns:
+            total = float(work[metric].sum()) if metric in work.columns else 0.0
+            frame[share_col] = [
+                _round(_safe_ratio(val, total) * 100.0)
+                for val in frame[metric]
+            ]
+
+    # Round and normalize available columns.
+    if "average_lead_time_days" in frame.columns:
+        frame["average_lead_time_days"] = frame["average_lead_time_days"].map(_round)
+    if "revenue" in frame.columns:
+        frame["revenue"] = frame["revenue"].map(_round)
+    if "cost" in frame.columns:
+        frame["cost"] = frame["cost"].map(_round)
+    if "profit" in frame.columns:
+        frame["profit"] = frame["profit"].map(_round)
+    if "units_sold" in frame.columns:
+        frame["units_sold"] = _normalize_units_column(frame["units_sold"])
 
     frame = frame.sort_values(
-        ["revenue", dimension], ascending=[False, True], kind="stable"
+        [sort_metric, dimension], ascending=[False, True], kind="stable"
     ).reset_index(drop=True)
-    return frame[
-        [
-            dimension,
-            "units_sold",
-            "revenue",
-            "cost",
-            "profit",
-            "profit_margin_pct",
-            "average_lead_time_days",
-            "revenue_share_pct",
-            "units_share_pct",
-        ]
-    ]
+
+    # Build output columns in a stable order.
+    out_cols = [dimension]
+    for col in (
+        "units_sold", "revenue", "cost", "profit", "profit_margin_pct",
+        "average_lead_time_days", "revenue_share_pct", "units_share_pct",
+    ):
+        if col in frame.columns:
+            out_cols.append(col)
+    return frame[out_cols]
 
 
 def _period_summary(work: pd.DataFrame) -> tuple[dict[str, object], dict[str, float]]:
@@ -229,41 +273,84 @@ def _period_summary(work: pd.DataFrame) -> tuple[dict[str, object], dict[str, fl
 
     Returns ``(presentation, raw)`` where ``presentation`` holds the
     rounded output values and ``raw`` holds the unrounded aggregates used
-    for percentage-change calculations.
+    for percentage-change calculations.  Only columns that exist in the
+    working copy are included.
     """
-    total_units = float(work["units_sold"].sum())
-    total_revenue = float(work["revenue"].sum())
-    total_cost = float(work["cost"].sum())
-    profit = total_revenue - total_cost
-    margin_pct = _safe_ratio(profit, total_revenue) * 100.0
-    average_lead_time = float(work["lead_time_days"].mean())
     dates = pd.DatetimeIndex(sorted(work["date"].unique()))
-    presentation = {
+    presentation: dict[str, object] = {
         "start": dates.min().strftime("%Y-%m-%d"),
         "end": dates.max().strftime("%Y-%m-%d"),
-        "units_sold": _as_count(total_units),
-        "revenue": _round(total_revenue),
-        "cost": _round(total_cost),
-        "profit": _round(profit),
-        "profit_margin_pct": _round(margin_pct),
-        "average_lead_time_days": _round(average_lead_time),
     }
-    raw = {
-        "units_sold": total_units,
-        "revenue": total_revenue,
-        "cost": total_cost,
-        "profit": profit,
-        "profit_margin_pct": margin_pct,
-        "average_lead_time_days": average_lead_time,
-    }
+    raw: dict[str, float] = {}
+
+    if "units_sold" in work.columns:
+        total_units = float(work["units_sold"].sum())
+        presentation["units_sold"] = _as_count(total_units)
+        raw["units_sold"] = total_units
+
+    if "revenue" in work.columns:
+        total_revenue = float(work["revenue"].sum())
+        presentation["revenue"] = _round(total_revenue)
+        raw["revenue"] = total_revenue
+
+    if "cost" in work.columns:
+        total_cost = float(work["cost"].sum())
+        presentation["cost"] = _round(total_cost)
+        raw["cost"] = total_cost
+
+    if "revenue" in raw and "cost" in raw:
+        profit = raw["revenue"] - raw["cost"]
+        if raw["revenue"] != 0.0 or raw["cost"] != 0.0:
+            presentation["profit"] = _round(profit)
+            presentation["profit_margin_pct"] = _round(
+                _safe_ratio(profit, raw["revenue"]) * 100.0
+            )
+            raw["profit"] = profit
+            raw["profit_margin_pct"] = _safe_ratio(profit, raw["revenue"]) * 100.0
+
+    if "lead_time_days" in work.columns:
+        average_lead_time = float(work["lead_time_days"].mean())
+        presentation["average_lead_time_days"] = _round(average_lead_time)
+        raw["average_lead_time_days"] = average_lead_time
+
     return presentation, raw
 
 
 # --- Public API -------------------------------------------------------------
 
 
+def _build_metric_metadata(work: pd.DataFrame) -> dict[str, dict[str, object]]:
+    """Build per-metric metadata for the frontend.
+
+    For each canonical numeric metric that exists in *work*, reports:
+    * ``real`` – ``True`` when the column contains non-zero variance
+      (i.e. at least one value differs from the rest);
+    * ``synthesized`` – ``True`` when all values are identical (typically
+      zero-filled by the schema adapter);
+    * ``direction`` – ``"higher_is_better"`` or ``"lower_is_better"``.
+    """
+    metadata: dict[str, dict[str, object]] = {}
+    for metric in ("units_sold", "revenue", "cost", "lead_time_days"):
+        if metric not in work.columns:
+            continue
+        series = work[metric]
+        has_variance = bool(series.nunique(dropna=True) > 1)
+        metadata[metric] = {
+            "real": has_variance,
+            "synthesized": not has_variance,
+            "direction": _METRIC_DIRECTION.get(metric, "higher_is_better"),
+        }
+    return metadata
+
+
 def calculate_kpis(df: pd.DataFrame) -> dict[str, object]:
     """Calculate headline operational KPIs for a validated dataset.
+
+    Only metrics whose columns exist in the input are computed.  A
+    ``metric_metadata`` dict is included in the result so the frontend
+    knows which metrics are *real* (mapped from user data) versus
+    *synthesized* (filled with neutral constants), plus the preferred
+    display direction for each metric.
 
     Args:
         df: Operational DataFrame following the canonical schema. It is
@@ -275,39 +362,66 @@ def calculate_kpis(df: pd.DataFrame) -> dict[str, object]:
         ``average_daily_units_sold``, ``average_daily_revenue``,
         ``average_daily_cost``, ``average_daily_profit``,
         ``average_lead_time_days``, ``unique_regions``,
-        ``unique_products``, and ``date_range`` (``start``/``end`` ISO
-        strings). Daily averages divide by the number of unique dates,
-        not the row count.
+        ``unique_products``, ``date_range`` (``start``/``end`` ISO
+        strings), and ``metric_metadata``.  Daily averages divide by the
+        number of unique dates, not the row count.
 
     Raises:
         DataValidationError: If the dataset is unusable (see module policy).
     """
     work = _prepare_operational_data(df)
 
-    total_units = float(work["units_sold"].sum())
-    total_revenue = float(work["revenue"].sum())
-    total_cost = float(work["cost"].sum())
-    total_profit = total_revenue - total_cost
     unique_dates = int(work["date"].nunique())
 
-    return {
-        "total_units_sold": _as_count(total_units),
-        "total_revenue": _round(total_revenue),
-        "total_cost": _round(total_cost),
-        "total_profit": _round(total_profit),
-        "profit_margin_pct": _round(_safe_ratio(total_profit, total_revenue) * 100.0),
-        "average_daily_units_sold": _round(total_units / unique_dates),
-        "average_daily_revenue": _round(total_revenue / unique_dates),
-        "average_daily_cost": _round(total_cost / unique_dates),
-        "average_daily_profit": _round(total_profit / unique_dates),
-        "average_lead_time_days": _round(work["lead_time_days"].mean()),
-        "unique_regions": int(work["region"].nunique()),
-        "unique_products": int(work["product"].nunique()),
-        "date_range": {
-            "start": work["date"].min().strftime("%Y-%m-%d"),
-            "end": work["date"].max().strftime("%Y-%m-%d"),
-        },
+    result: dict[str, object] = {}
+
+    # --- numeric totals -------------------------------------------------------
+    if "units_sold" in work.columns:
+        total_units = float(work["units_sold"].sum())
+        result["total_units_sold"] = _as_count(total_units)
+        result["average_daily_units_sold"] = _round(total_units / unique_dates)
+
+    if "revenue" in work.columns:
+        total_revenue = float(work["revenue"].sum())
+        result["total_revenue"] = _round(total_revenue)
+        result["average_daily_revenue"] = _round(total_revenue / unique_dates)
+
+    if "cost" in work.columns:
+        total_cost = float(work["cost"].sum())
+        result["total_cost"] = _round(total_cost)
+        result["average_daily_cost"] = _round(total_cost / unique_dates)
+
+    # Profit / margin only when both revenue and cost exist.
+    if "revenue" in work.columns and "cost" in work.columns:
+        total_revenue = float(work["revenue"].sum())
+        total_cost = float(work["cost"].sum())
+        total_profit = total_revenue - total_cost
+        if total_revenue != 0.0 or total_cost != 0.0:
+            result["total_profit"] = _round(total_profit)
+            result["profit_margin_pct"] = _round(
+                _safe_ratio(total_profit, total_revenue) * 100.0
+            )
+            result["average_daily_profit"] = _round(total_profit / unique_dates)
+
+    if "lead_time_days" in work.columns:
+        result["average_lead_time_days"] = _round(work["lead_time_days"].mean())
+
+    # --- dimension counts -----------------------------------------------------
+    if "region" in work.columns:
+        result["unique_regions"] = int(work["region"].nunique())
+    if "product" in work.columns:
+        result["unique_products"] = int(work["product"].nunique())
+
+    # --- date range -----------------------------------------------------------
+    result["date_range"] = {
+        "start": work["date"].min().strftime("%Y-%m-%d"),
+        "end": work["date"].max().strftime("%Y-%m-%d"),
     }
+
+    # --- metric metadata ------------------------------------------------------
+    result["metric_metadata"] = _build_metric_metadata(work)
+
+    return result
 
 
 def calculate_region_performance(df: pd.DataFrame) -> pd.DataFrame:
@@ -317,11 +431,9 @@ def calculate_region_performance(df: pd.DataFrame) -> pd.DataFrame:
         df: Operational DataFrame. It is never mutated.
 
     Returns:
-        DataFrame with columns ``region``, ``units_sold``, ``revenue``,
-        ``cost``, ``profit``, ``profit_margin_pct``,
-        ``average_lead_time_days``, ``revenue_share_pct``, and
-        ``units_share_pct``, sorted by revenue descending then region
-        ascending.
+        DataFrame with columns for the dimension (``region``) and any
+        available numeric metrics, sorted by the first available numeric
+        metric descending then region ascending.
 
     Raises:
         DataValidationError: If the dataset is unusable (see module policy).
@@ -337,9 +449,10 @@ def calculate_product_performance(df: pd.DataFrame) -> pd.DataFrame:
         df: Operational DataFrame. It is never mutated.
 
     Returns:
-        DataFrame with the same columns as
+        DataFrame with the same metric columns as
         ``calculate_region_performance`` but keyed by ``product``, sorted
-        by revenue descending then product ascending.
+        by the first available numeric metric descending then product
+        ascending.
 
     Raises:
         DataValidationError: If the dataset is unusable (see module policy).
@@ -356,10 +469,10 @@ def calculate_daily_trends(df: pd.DataFrame) -> pd.DataFrame:
 
     Returns:
         DataFrame with exactly one row per unique date containing
-        ``date`` (ISO ``YYYY-MM-DD`` string), ``units_sold``,
-        ``revenue``, ``cost``, ``profit``, ``profit_margin_pct``, and
-        ``average_lead_time_days``, sorted ascending by date regardless
-        of the original row order.
+        ``date`` (ISO ``YYYY-MM-DD`` string) and any available numeric
+        columns (``units_sold``, ``revenue``, ``cost``, ``profit``,
+        ``profit_margin_pct``, ``average_lead_time_days``), sorted
+        ascending by date regardless of the original row order.
 
     Raises:
         DataValidationError: If the dataset is unusable (see module policy).
@@ -367,26 +480,28 @@ def calculate_daily_trends(df: pd.DataFrame) -> pd.DataFrame:
     work = _prepare_operational_data(df)
     frame = _aggregate_by(work, ["date"])
     frame = _add_profit_columns(frame)
-    frame["average_lead_time_days"] = frame["average_lead_time_days"].map(_round)
-    frame["revenue"] = frame["revenue"].map(_round)
-    frame["cost"] = frame["cost"].map(_round)
-    frame["profit"] = frame["profit"].map(_round)
-    frame["units_sold"] = _normalize_units_column(frame["units_sold"])
+    if "average_lead_time_days" in frame.columns:
+        frame["average_lead_time_days"] = frame["average_lead_time_days"].map(_round)
+    if "revenue" in frame.columns:
+        frame["revenue"] = frame["revenue"].map(_round)
+    if "cost" in frame.columns:
+        frame["cost"] = frame["cost"].map(_round)
+    if "profit" in frame.columns:
+        frame["profit"] = frame["profit"].map(_round)
+    if "units_sold" in frame.columns:
+        frame["units_sold"] = _normalize_units_column(frame["units_sold"])
     frame["date"] = frame["date"].dt.strftime("%Y-%m-%d")
     frame = frame.sort_values("date", ascending=True, kind="stable").reset_index(
         drop=True
     )
-    return frame[
-        [
-            "date",
-            "units_sold",
-            "revenue",
-            "cost",
-            "profit",
-            "profit_margin_pct",
-            "average_lead_time_days",
-        ]
-    ]
+    out_cols = ["date"]
+    for col in (
+        "units_sold", "revenue", "cost", "profit",
+        "profit_margin_pct", "average_lead_time_days",
+    ):
+        if col in frame.columns:
+            out_cols.append(col)
+    return frame[out_cols]
 
 
 def calculate_period_comparison(df: pd.DataFrame) -> dict[str, object]:
@@ -394,26 +509,23 @@ def calculate_period_comparison(df: pd.DataFrame) -> dict[str, object]:
 
     Periods are built from the sorted unique dates. ``period_1`` is the
     earlier half and acts as the *previous* period; ``period_2`` is the
-    later half and acts as the *current* period. When the number of
+    later half and acts as the *current* period.  When the number of
     unique dates is odd, the middle date belongs to ``period_1`` so that
     ``period_1`` always contains ``ceil(n / 2)`` dates.
 
     Percentage changes use ``(current - previous) / previous * 100`` and
     are computed from the unrounded aggregates so that presentation
     rounding never leaks into the change math; a zero previous value
-    yields ``0.0``.
+    yields ``0.0``.  Only metrics whose columns exist are compared.
 
     Args:
         df: Operational DataFrame. It is never mutated.
 
     Returns:
         Dictionary with ``period_1`` and ``period_2`` summaries (each
-        with ``start``, ``end``, ``units_sold``, ``revenue``, ``cost``,
-        ``profit``, ``profit_margin_pct``,
-        ``average_lead_time_days``) plus ``changes_pct`` containing
-        ``units_change_pct``, ``revenue_change_pct``,
-        ``cost_change_pct``, ``profit_change_pct``,
-        ``margin_change_pct``, and ``lead_time_change_pct``.
+        with ``start``, ``end``, and available metric keys) plus
+        ``changes_pct`` containing ``*_change_pct`` for each available
+        metric.
 
     Raises:
         DataValidationError: If the dataset is unusable or contains fewer
@@ -433,20 +545,19 @@ def calculate_period_comparison(df: pd.DataFrame) -> dict[str, object]:
     period_1, raw_1 = _period_summary(work[work["date"].isin(period_1_dates)])
     period_2, raw_2 = _period_summary(work[work["date"].isin(period_2_dates)])
 
-    changes_pct = {
-        "units_change_pct": _safe_pct_change(
-            raw_2["units_sold"], raw_1["units_sold"]
-        ),
-        "revenue_change_pct": _safe_pct_change(raw_2["revenue"], raw_1["revenue"]),
-        "cost_change_pct": _safe_pct_change(raw_2["cost"], raw_1["cost"]),
-        "profit_change_pct": _safe_pct_change(raw_2["profit"], raw_1["profit"]),
-        "margin_change_pct": _safe_pct_change(
-            raw_2["profit_margin_pct"], raw_1["profit_margin_pct"]
-        ),
-        "lead_time_change_pct": _safe_pct_change(
-            raw_2["average_lead_time_days"], raw_1["average_lead_time_days"]
-        ),
-    }
+    # Build changes only for metrics present in both periods.
+    _change_map: list[tuple[str, str, str]] = [
+        ("units_sold", "units_change_pct", "units_sold"),
+        ("revenue", "revenue_change_pct", "revenue"),
+        ("cost", "cost_change_pct", "cost"),
+        ("profit", "profit_change_pct", "profit"),
+        ("profit_margin_pct", "margin_change_pct", "profit_margin_pct"),
+        ("average_lead_time_days", "lead_time_change_pct", "average_lead_time_days"),
+    ]
+    changes_pct: dict[str, float] = {}
+    for raw_key, change_key, _ in _change_map:
+        if raw_key in raw_1 and raw_key in raw_2:
+            changes_pct[change_key] = _safe_pct_change(raw_2[raw_key], raw_1[raw_key])
 
     return {
         "period_1": period_1,
@@ -476,8 +587,14 @@ def _extreme_performers(
     }
     result: dict[str, list[dict[str, object]]] = {}
     for key, (frame, dimension) in frames.items():
+        # Determine sort metric: first available numeric column.
+        _numeric = [
+            c for c in ("revenue", "units_sold", "cost", "average_lead_time_days")
+            if c in frame.columns
+        ]
+        sort_col = _numeric[0] if _numeric else dimension
         ordered = frame.sort_values(
-            ["revenue", dimension], ascending=[not top, True], kind="stable"
+            [sort_col, dimension], ascending=[not top, True], kind="stable"
         ).head(limit)
         records = [
             {str(column): _to_python(value) for column, value in row.items()}

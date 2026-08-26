@@ -7,7 +7,7 @@
  * API serializer). No new business logic, no fabricated values.
  */
 
-import { metricLabel } from "./labels";
+import { METRIC_LABELS, metricLabel } from "./labels";
 import type { AnomalyRecord } from "./types";
 
 export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
@@ -72,6 +72,118 @@ export function prioritySignals(
   limit = 5,
 ): AnomalyRecord[] {
   return sortForPriority(anomalies).slice(0, limit);
+}
+
+/**
+ * The single most important signal for the executive summary: highest
+ * severity first, then strongest deviation, then most recent date.
+ */
+export function topConcernSignal(
+  anomalies: AnomalyRecord[],
+): AnomalyRecord | null {
+  if (anomalies.length === 0) return null;
+  return sortForPriority(anomalies)[0];
+}
+
+/** Observed date span across a set of signals ("Jun–Sep 2025" style). */
+export function signalPeriodRange(
+  anomalies: AnomalyRecord[],
+): string | null {
+  const dates = anomalies
+    .map((record) => String(record.date ?? ""))
+    .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date))
+    .sort();
+  if (dates.length === 0) return null;
+  const monthYear = (iso: string) => {
+    const [year, month] = iso.split("-");
+    const months = [
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const index = Number(month) - 1;
+    return index >= 0 && index < 12 ? `${months[index]} ${year}` : iso;
+  };
+  const first = monthYear(dates[0]);
+  const last = monthYear(dates[dates.length - 1]);
+  return first === last ? first : `${first} – ${last}`;
+}
+
+// --- Posture drivers ------------------------------------------------------------------------------------
+
+export interface PostureDriver {
+  metric: string;
+  label: string;
+  count: number;
+  /** Σ severity weights — drives the ordering only. */
+  weight: number;
+}
+
+/**
+ * The metrics that contribute most to the current posture, derived from
+ * the same deterministic records that feed the severity counts. Pure
+ * presentation aggregation — no new scoring semantics.
+ */
+export function postureDrivers(
+  anomalies: AnomalyRecord[],
+  limit = 3,
+): PostureDriver[] {
+  const map = new Map<string, { count: number; weight: number }>();
+  for (const record of anomalies) {
+    const key = String(record.metric ?? "other");
+    const entry = map.get(key) ?? { count: 0, weight: 0 };
+    entry.count += 1;
+    entry.weight += WEIGHT[normalizeSeverity(record.severity)];
+    map.set(key, entry);
+  }
+  return [...map.entries()]
+    .map(([metric, agg]) => ({
+      metric,
+      label: metricLabel(metric),
+      count: agg.count,
+      weight: agg.weight,
+    }))
+    .sort((a, b) => b.weight - a.weight || b.count - a.count)
+    .slice(0, limit);
+}
+
+// --- Deviation semantics --------------------------------------------------------------------------------
+
+/**
+ * Metrics where running ABOVE expectation is the adverse direction
+ * (cost pressure, fulfilment delay). All other tracked metrics are
+ * revenue-like: falling short of expectation is what hurts.
+ */
+export const HIGHER_IS_ADVERSE = new Set(["cost", "lead_time_days"]);
+
+export type DeviationDirection = "up" | "down";
+
+export function deviationDirection(deviation: number): DeviationDirection {
+  return deviation >= 0 ? "up" : "down";
+}
+
+/**
+ * Whether a deviation moves the metric in its operationally adverse
+ * direction. Deterministic from the metric identity — used only for
+ * presentation tone, never for scoring.
+ */
+export function deviationIsAdverse(
+  metric: unknown,
+  deviation: number,
+): boolean {
+  if (!Number.isFinite(deviation) || deviation === 0) return false;
+  const key = String(metric ?? "");
+  if (HIGHER_IS_ADVERSE.has(key)) return deviation > 0;
+  if (METRIC_LABELS[key]) return deviation < 0;
+  return false;
+}
+
+/** Sign-correct display text: "+18.4%", "−6.2%" (real minus, not hyphen). */
+export function formatDeviation(deviation: number): string {
+  if (!Number.isFinite(deviation)) return "—";
+  const magnitude = Math.abs(deviation).toFixed(1);
+  if (deviation > 0) return `+${magnitude}%`;
+  if (deviation < 0) return `−${magnitude}%`;
+  return "0.0%";
 }
 
 // --- Grouping ------------------------------------------------------------------------------------------
@@ -166,7 +278,21 @@ export interface PosturePresentation {
   prioritySignals: number;
   attentionNeeded: boolean;
   summary: string;
+  /** One-sentence causal explanation naming the driving severities. */
+  why: string;
 }
+
+/**
+ * Canonical band edges mirrored from the backend formula
+ * (`app.ui.posture`: score = 100 - min(100, Σ weight·count), weights
+ * CRITICAL 25 / HIGH 12 / MEDIUM 5 / LOW 2). Display-only duplication,
+ * kept in sync so the UI can explain the scale honestly.
+ */
+export const POSTURE_SCALE: { min: number; label: string }[] = [
+  { min: 80, label: "Steady" },
+  { min: 60, label: "Moderate Attention" },
+  { min: 0, label: "Needs Attention" },
+];
 
 export function presentPosture(
   posture: { score: number; band: string } | null | undefined,
@@ -182,6 +308,18 @@ export function presentPosture(
     : totalSignals > 0
       ? "No critical or high signals — routine monitoring applies"
       : "No operational signals detected";
+  const drivers: string[] = [];
+  if (counts.CRITICAL > 0)
+    drivers.push(
+      `${counts.CRITICAL} critical signal${counts.CRITICAL === 1 ? "" : "s"}`,
+    );
+  if (counts.HIGH > 0)
+    drivers.push(`${counts.HIGH} high-severity signal${counts.HIGH === 1 ? "" : "s"}`);
+  const why = drivers.length
+    ? `Operational posture is elevated because ${drivers.join(" and ")} ${drivers.length === 1 ? "is" : "are"} active.`
+    : totalSignals > 0
+      ? "Only low and medium-severity signals were detected — nothing demands immediate action."
+      : "No signals crossed the detection thresholds in the latest run.";
   return {
     score: posture.score,
     band: posture.band,
@@ -190,5 +328,6 @@ export function presentPosture(
     prioritySignals,
     attentionNeeded,
     summary,
+    why,
   };
 }

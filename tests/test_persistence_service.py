@@ -73,7 +73,7 @@ def engine(tmp_path):
 
 
 def make_record(**overrides: object) -> dict[str, object]:
-    """Minimal valid Phase 5 record (exact 17-key contract)."""
+    """Minimal valid Phase 5 record (exact 21-key contract)."""
     base: dict[str, object] = {
         "recommendation_id": "R1",
         "priority": "HIGH",
@@ -92,6 +92,10 @@ def make_record(**overrides: object) -> dict[str, object]:
         "evidence_strength": 20.0,
         "requires_human_review": True,
         "status": RECOMMENDATION_PENDING,
+        "problem_statement": "An unusual HIGH revenue anomaly was detected in the dataset.",
+        "why_it_matters": "This anomaly may indicate operational irregularities requiring investigation.",
+        "likely_drivers": ["localized_high_anomaly"],
+        "expected_benefit": "Investigating this anomaly could uncover operational issues.",
     }
     base.update(overrides)
     return base

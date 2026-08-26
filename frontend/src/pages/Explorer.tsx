@@ -100,6 +100,27 @@ export default function Explorer() {
     );
   }
 
+  if (preview.isError) {
+    return (
+      <div>
+        <PageHeader eyebrow="Data" title="Data Explorer" />
+        <EmptyState
+          icon={<Compass size={20} />}
+          title="Could not load the dataset preview"
+          body="The explorer could not read a preview of the active dataset. The dataset itself is still loaded — retry, or return to the Data workspace."
+          action={
+            <div className="flex gap-2">
+              <Button onClick={() => preview.refetch()}>Retry</Button>
+              <Link to="/data">
+                <Button variant="ghost">Open Data Workspace</Button>
+              </Link>
+            </div>
+          }
+        />
+      </div>
+    );
+  }
+
   if (preview.isLoading || !preview.data) {
     return (
       <div>
@@ -465,7 +486,7 @@ function PreviewTable({ preview }: { preview: DatasetPreview }) {
             {slice.map((row, i) => (
               <tr
                 key={i}
-                className="border-b border-line/50 transition-colors last:border-0 hover:bg-white/[0.02]"
+                className="border-b border-line/50 transition-colors last:border-0 hover:bg-faint"
               >
                 {preview.columns.map((column) => (
                   <td
@@ -560,3 +581,4 @@ function syncChartType(
   const allowed = allowedChartTypes(preview.columns, x, y);
   setChartType(allowed[0]);
 }
+

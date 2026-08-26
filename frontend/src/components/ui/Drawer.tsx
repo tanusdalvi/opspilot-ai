@@ -20,7 +20,7 @@ export function Drawer({
       {open && (
         <>
           <motion.div
-            className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px]"
+            className="fixed inset-0 z-40 bg-scrim backdrop-blur-[2px]"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}

@@ -92,7 +92,10 @@ export function StatTile({
         </p>
         {spark && spark.length > 1 && (
           <div className="mt-2 opacity-80">
-            <Sparkline values={spark} tone={(changePct ?? 0) < 0 ? "#ff5d6c" : "#5b8cff"} />
+            <Sparkline
+              values={spark}
+              tone={(changePct ?? 0) < 0 ? "var(--color-danger)" : "var(--color-accent)"}
+            />
           </div>
         )}
       </div>

@@ -449,3 +449,137 @@ def _cleanup_tmp_db():
         _TMP_DB.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+# --- regression: transient lifecycle states must never be masked -------------------
+
+
+def test_running_status_is_never_masked_by_stale_recovery(
+    session_token, tmp_path, monkeypatch
+):
+    """While a run is in flight, polling must observe ANALYZING.
+
+    Regression: a stale recovery sidecar on disk used to mask the live
+    ANALYZING state, so the frontend stopped polling mid-run and never
+    learned the outcome.
+    """
+    sidecar = tmp_path / "recovery.json"
+    sidecar.write_text(
+        '{"version": 1, "dataset_name": "demo_operational_data.csv", '
+        '"source": "demo", "sensitivity": "medium", '
+        '"completed_at": "2026-01-01T00:00:00", "status": "READY"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        api_sessions.orchestrator, "_recovery_context_path", lambda: sidecar
+    )
+    _load_demo(session_token)
+    response = client.post(
+        "/api/analysis/run",
+        json={"sensitivity": "medium", "wait": True},
+        headers=session_token["headers"],
+    )
+    assert response.status_code == 200
+    # Simulate the in-flight window directly: begin_analysis then poll.
+    token = api_sessions.get_session(session_token["token"])
+    api_sessions.begin_analysis(token)
+    try:
+        status = client.get(
+            "/api/analysis/status", headers=session_token["headers"]
+        ).json()
+        assert status["analysis_status"] == "ANALYZING"
+        assert status["analysis_running"] is True
+    finally:
+        # Settle back to READY so later assertions/tests see clean state.
+        api_sessions.complete_analysis(token, token.artifacts)
+
+
+def test_error_status_is_never_masked_by_stale_recovery(
+    session_token, tmp_path, monkeypatch
+):
+    """A failed run must surface ERROR even when recovery data exists."""
+    sidecar = tmp_path / "recovery.json"
+    sidecar.write_text(
+        '{"version": 1, "dataset_name": "demo_operational_data.csv", '
+        '"source": "demo", "sensitivity": "medium", '
+        '"completed_at": "2026-01-01T00:00:00", "status": "READY"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        api_sessions.orchestrator, "_recovery_context_path", lambda: sidecar
+    )
+    _load_demo(session_token)
+    token = api_sessions.get_session(session_token["token"])
+    api_sessions.begin_analysis(token)
+    api_sessions.fail_analysis(token, "boom")
+    status = client.get(
+        "/api/analysis/status", headers=session_token["headers"]
+    ).json()
+    assert status["analysis_status"] == "ERROR"
+    assert status["analysis_error"] == "boom"
+
+
+# --- dynamic dataset compatibility through the API --------------------------------
+
+
+def _upload_csv(token_headers: dict, filename: str, content: str) -> dict:
+    import io
+
+    response = client.post(
+        "/api/datasets/upload",
+        files={"file": (filename, io.BytesIO(content.encode("utf-8")), "text/csv")},
+        headers=token_headers["headers"],
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_custom_generic_csv_upload_runs_full_pipeline(session_token):
+    """A generic CSV must classify PARTIAL, run, and reach READY."""
+    body = _upload_csv(
+        session_token,
+        "store_sales.csv",
+        "order_date,store,sales_amount,quantity\n"
+        "2025-01-01,north,1200.5,100\n"
+        "2025-01-02,south,1310.2,110\n"
+        "2025-01-03,north,1150.0,95\n",
+    )
+    compatibility = body["compatibility"]
+    assert compatibility["tier"] == "partial"
+    assert compatibility["mapping"]["revenue"] == "sales_amount"
+
+    status = client.get(
+        "/api/system", headers=session_token["headers"]
+    ).json()
+    assert status["dataset"]["compatibility"]["tier"] == "partial"
+
+    run = _run_analysis_wait(session_token)
+    assert run["analysis_status"] == "READY"
+
+    artifacts = client.get(
+        "/api/analysis/artifacts", headers=session_token["headers"]
+    ).json()["artifacts"]
+    assert artifacts["row_count"] == 3
+    # Real mapped data produced real KPIs.
+    assert artifacts["kpis"]["total_revenue"] > 0
+
+
+def test_unsupported_dataset_is_classified_and_blocked(session_token):
+    """No date + no numerics: classified unsupported with clear reasons."""
+    body = _upload_csv(
+        session_token,
+        "notes.csv",
+        "title,body\nhello,world\nsecond,row\n",
+    )
+    compatibility = body["compatibility"]
+    assert compatibility["tier"] == "unsupported"
+    assert compatibility["reasons"]
+
+    response = client.post(
+        "/api/analysis/run",
+        json={"sensitivity": "medium", "wait": True},
+        headers=session_token["headers"],
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "date/time" in detail or "numeric" in detail

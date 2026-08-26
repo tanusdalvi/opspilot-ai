@@ -11,11 +11,15 @@ import {
   Eye,
   FileSearch,
   Lightbulb,
+  Monitor,
+  Moon,
   Play,
   Sparkles,
+  Sun,
   Upload,
 } from "lucide-react";
 import { useWorkspace } from "../../state/workspace";
+import { useTheme, type ThemePreference } from "../../state/theme";
 
 interface CommandItem {
   id: string;
@@ -36,9 +40,26 @@ export function CommandPalette({
   const navigate = useNavigate();
   const { system, artifacts, runAnalysis, loadDemo, startInvestigation } =
     useWorkspace();
+  const { setPreference } = useTheme();
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const themeCommands: CommandItem[] = (
+    [
+      { value: "light", label: "Set Light Theme", icon: Sun },
+      { value: "dark", label: "Set Dark Theme", icon: Moon },
+      { value: "system", label: "Follow System Theme", icon: Monitor },
+    ] as { value: ThemePreference; label: string; icon: typeof Eye }[]
+  ).map(({ value, label, icon }) => ({
+    id: `theme-${value}`,
+    group: "Theme",
+    label,
+    icon,
+    keywords: "appearance color mode",
+    run: () => setPreference(value),
+  }));
+
   const commands: CommandItem[] = [
+    ...themeCommands,
     ...[
       { path: "/", label: "Open Overview", icon: Eye },
       { path: "/data", label: "Open Data", icon: Database },
@@ -143,7 +164,7 @@ export function CommandPalette({
       onOpenChange={onOpenChange}
       loop
       className="fixed inset-0 z-[70]"
-      overlayClassName="fixed inset-0 bg-black/55 backdrop-blur-[2px]"
+      overlayClassName="fixed inset-0 bg-scrim backdrop-blur-[2px]"
       contentClassName="mx-auto mt-[14vh] w-[min(92vw,560px)] overflow-hidden rounded-xl border border-line-strong bg-bg-soft shadow-2xl shadow-black/60"
       shouldFilter
       aria-label="Command palette"
@@ -157,7 +178,7 @@ export function CommandPalette({
         <Command.Empty className="px-3 py-6 text-center text-sm text-text-muted">
           No matching commands.
         </Command.Empty>
-        {["Navigation", "Actions"].map((group) => (
+        {["Navigation", "Actions", "Theme"].map((group) => (
           <Command.Group
             key={group}
             heading={group}

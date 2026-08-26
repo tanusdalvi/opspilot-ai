@@ -70,7 +70,12 @@ class WorkspaceSession:
     # dataset layer
     df: pd.DataFrame | None = None
     dataset_name: str | None = None
+    dataset_source: str = "upload"
     validation_report: dict | None = None
+    # canonical-schema projection used by the pipeline (partial datasets)
+    adapted_df: pd.DataFrame | None = None
+    compatibility: dict | None = None
+    capability_profile: dict | None = None
 
     # analysis lifecycle
     status: str = ANALYSIS_IDLE
@@ -105,12 +110,19 @@ def get_session(token: str | None) -> WorkspaceSession:
 
 
 def reset_dataset(session: WorkspaceSession, df: pd.DataFrame, name: str,
-                  report: dict) -> None:
+                  report: dict, adapted_df: pd.DataFrame | None = None,
+                  compatibility: dict | None = None,
+                  capability_profile: dict | None = None,
+                  source: str = "upload") -> None:
     """Activate a newly loaded dataset; drops all downstream state."""
     with session.lock:
         session.df = df
         session.dataset_name = name
+        session.dataset_source = source
         session.validation_report = report
+        session.adapted_df = adapted_df
+        session.compatibility = compatibility
+        session.capability_profile = capability_profile
         session.status = ANALYSIS_IDLE
         session.analysis_error = None
         session.artifacts = None
@@ -160,9 +172,17 @@ def fail_analysis(session: WorkspaceSession, message: str) -> None:
 
 
 def effective_status(session: WorkspaceSession) -> str:
-    """Resolve the stored status, deriving RECOVERY_AVAILABLE like the UI."""
-    if session.status == ANALYSIS_READY:
-        return ANALYSIS_READY
+    """Resolve the stored status, deriving RECOVERY_AVAILABLE like the UI.
+
+    Transient states are authoritative and are never masked: while a run
+    is in flight (ANALYZING) or has just failed (ERROR), polling clients
+    must observe exactly that — a stale recovery sidecar on disk must
+    not hide an active lifecycle transition, or the frontend would stop
+    polling mid-run and never learn the outcome. RECOVERY_AVAILABLE is
+    derived only when the session is otherwise idle with no artifacts.
+    """
+    if session.status in (ANALYSIS_READY, ANALYSIS_RUNNING, ANALYSIS_ERROR):
+        return session.status
     if session.artifacts is not None:
         return session.status
     context = orchestrator.load_recovery_context()
@@ -175,12 +195,17 @@ def run_analysis_sync(session: WorkspaceSession, sensitivity: str) -> None:
     """Execute one deterministic pipeline run synchronously.
 
     The API route executes this on a worker thread so the frontend can
-    poll honest status; there are no fake progress stages.
+    poll honest status; there are no fake progress stages. Partially
+    compatible datasets run on their canonical-schema projection
+    (``adapted_df``); fully compatible datasets run on the raw frame.
     """
     begin_analysis(session)
     try:
+        analysis_df = (
+            session.adapted_df if session.adapted_df is not None else session.df
+        )
         artifacts = orchestrator.run_pipeline(
-            session.df, dataset_name=session.dataset_name or "dataset",
+            analysis_df, dataset_name=session.dataset_name or "dataset",
             sensitivity=sensitivity,
         )
     except Exception as exc:  # noqa: BLE001 - mapped by the caller

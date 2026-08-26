@@ -35,6 +35,8 @@ interface WorkspaceValue {
   loadDemo: (filename: string) => Promise<void>;
   uploadDataset: (file: File) => Promise<void>;
   runAnalysis: (sensitivity: string, wait?: boolean) => Promise<void>;
+  /** True from click until a definitive READY/ERROR outcome arrives. */
+  runPending: boolean;
   startInvestigation: () => Promise<void>;
   investigation: {
     status: string;
@@ -42,6 +44,8 @@ interface WorkspaceValue {
     result: InvestigationResult | null;
   };
   ensurePlan: (maxRecommendations?: number) => Promise<PlanPayload>;
+  /** Tracks the current stage of a data-loading flow (null when idle). */
+  loadingStage: string | null;
 }
 
 const WorkspaceContext = createContext<WorkspaceValue | null>(null);
@@ -55,6 +59,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const toastId = useRef(0);
   // Explicit-action latch: the AI call fires only when this is armed.
   const [investigationArmed, setInvestigationArmed] = useState(false);
+  const [loadingStage, setLoadingStage] = useState<string | null>(null);
 
   const pushToast = useCallback((toast: Omit<Toast, "id">) => {
     const id = ++toastId.current;
@@ -68,15 +73,53 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setToasts((current) => current.filter((t) => t.id !== id));
   }, []);
 
+  // Run latch: armed when the user starts an analysis and disarmed only
+  // by a definitive backend outcome (READY / ERROR). Polling continues
+  // while it is armed even if one poll misses the ANALYZING window.
+  const [runPending, setRunPending] = useState(false);
+
   const system = useQuery({
     queryKey: ["system"],
     queryFn: () => api<SystemPayload>("/api/system"),
     refetchInterval: (query) =>
+      runPending ||
       query.state.data?.analysis_running ||
       query.state.data?.investigation_status === "running"
         ? ANALYSIS_POLL_MS
         : false,
   });
+
+  // Watch the polled lifecycle while the latch is armed.
+  const lastSettledStatus = useRef<string | null>(null);
+  useEffect(() => {
+    if (!runPending) return;
+    const status = system.data?.analysis_status ?? null;
+    if (status === "ANALYZING") {
+      lastSettledStatus.current = null;
+      return;
+    }
+    if (status === "READY" || status === "ERROR") {
+      if (lastSettledStatus.current === status) return;
+      lastSettledStatus.current = status;
+      setRunPending(false);
+      void queryClient.invalidateQueries();
+      if (status === "READY") {
+        pushToast({
+          tone: "ok",
+          title: "Analysis complete",
+          body: "Results are ready across Analytics, Signals, and Insights.",
+        });
+      } else {
+        pushToast({
+          tone: "danger",
+          title: "Analysis failed",
+          body:
+            system.data?.analysis_error ??
+            "The pipeline could not complete this run.",
+        });
+      }
+    }
+  }, [runPending, system.data, pushToast, queryClient]);
 
   const artifacts = useQuery({
     queryKey: ["artifacts"],
@@ -132,12 +175,21 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         method: "POST",
         json: { filename },
       }),
+    onMutate: () => {
+      setLoadingStage("loading");
+    },
     onSuccess: () => {
+      setLoadingStage(null);
       void queryClient.invalidateQueries();
+      void queryClient.invalidateQueries({ queryKey: ["system"] });
+      void queryClient.invalidateQueries({ queryKey: ["artifacts"] });
+      void queryClient.invalidateQueries({ queryKey: ["dataset-preview"] });
       pushToast({ tone: "ok", title: "Dataset loaded" });
     },
-    onError: (error: Error) =>
-      pushToast({ tone: "danger", title: "Load failed", body: error.message }),
+    onError: (error: Error) => {
+      setLoadingStage(null);
+      pushToast({ tone: "danger", title: "Load failed", body: error.message });
+    },
   }).mutateAsync;
 
   const uploadDataset = useMutation({
@@ -146,16 +198,25 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         "/api/datasets/upload",
         file,
       ),
+    onMutate: () => {
+      setLoadingStage("uploading");
+    },
     onSuccess: (body) => {
+      setLoadingStage(null);
       void queryClient.invalidateQueries();
+      void queryClient.invalidateQueries({ queryKey: ["system"] });
+      void queryClient.invalidateQueries({ queryKey: ["artifacts"] });
+      void queryClient.invalidateQueries({ queryKey: ["dataset-preview"] });
       pushToast({
         tone: "ok",
         title: "Dataset uploaded",
         body: `${body.dataset.name} · ${body.dataset.rows} rows`,
       });
     },
-    onError: (error: Error) =>
-      pushToast({ tone: "danger", title: "Upload failed", body: error.message }),
+    onError: (error: Error) => {
+      setLoadingStage(null);
+      pushToast({ tone: "danger", title: "Upload failed", body: error.message });
+    },
   }).mutateAsync;
 
   const runAnalysis = useMutation({
@@ -164,12 +225,20 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         method: "POST",
         json: { sensitivity, wait: false },
       }),
+    onMutate: () => {
+      // Arm the latch immediately: the button state and polling must not
+      // depend on catching the transient ANALYZING window in a poll.
+      lastSettledStatus.current = null;
+      setRunPending(true);
+      void queryClient.invalidateQueries({ queryKey: ["system"] });
+    },
     onSuccess: () => {
-      void queryClient.invalidateQueries();
       pushToast({ tone: "info", title: "Analysis started" });
     },
-    onError: (error: Error) =>
-      pushToast({ tone: "danger", title: "Run failed", body: error.message }),
+    onError: (error: Error) => {
+      setRunPending(false);
+      pushToast({ tone: "danger", title: "Run failed", body: error.message });
+    },
   }).mutateAsync;
 
   const startInvestigation = useCallback(async () => {
@@ -192,6 +261,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       toasts,
       pushToast,
       dismissToast,
+      runPending,
       loadDemo: async (filename: string) => {
         await loadDemo(filename);
       },
@@ -208,6 +278,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         result: investigation.data?.result ?? null,
       },
       ensurePlan,
+      loadingStage,
     }),
     [
       system.data,
@@ -215,11 +286,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       toasts,
       pushToast,
       dismissToast,
+      runPending,
       loadDemo,
       uploadDataset,
       runAnalysis,
       startInvestigation,
       investigation.data,
+      loadingStage,
     ],
   );
 

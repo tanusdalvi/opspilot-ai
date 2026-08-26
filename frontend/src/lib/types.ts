@@ -22,8 +22,47 @@ export type LifecycleStage =
   | "HUMAN DECISION"
   | "AUDIT";
 
+export interface DatasetCompatibility {
+  tier: "full" | "partial" | "unsupported";
+  reasons: string[];
+  mapping: Record<string, string>;
+  synthesized: string[];
+  positional_fallback: boolean;
+  dropped_rows: number;
+  affected_derived_kpis: string[];
+}
+
+export interface CapabilityProfile {
+  dataset_class: "A" | "B" | "C" | "D" | "E";
+  row_count: number;
+  column_count: number;
+  has_date: boolean;
+  has_numeric: boolean;
+  has_categorical: boolean;
+  date_columns: string[];
+  numeric_columns: string[];
+  categorical_columns: string[];
+  capabilities: {
+    time_series_analysis: boolean;
+    anomaly_detection: boolean;
+    trend_analysis: boolean;
+    period_comparison: boolean;
+    distribution_analysis: boolean;
+    segment_comparison: boolean;
+    outlier_detection: boolean;
+    correlation_analysis: boolean;
+    category_frequency: boolean;
+    visualization: boolean;
+    finding_generation: boolean;
+    recommendation_generation: boolean;
+  };
+  classification_reasons: string[];
+  unavailable_capabilities: string[];
+}
+
 export interface DatasetInfo {
   name: string;
+  source?: "demo" | "upload" | string;
   rows: number;
   columns: number;
   memory_bytes: number;
@@ -33,6 +72,8 @@ export interface DatasetInfo {
     last: string;
     days: number;
   } | null;
+  compatibility?: DatasetCompatibility | null;
+  capability_profile?: CapabilityProfile | null;
 }
 
 export interface SystemPayload {
@@ -94,6 +135,25 @@ export interface AnomalyRecord {
   date?: string;
 }
 
+export interface Finding {
+  finding_id: string;
+  title: string;
+  severity: string;
+  score: number;
+  metric: string;
+  metric_label: string;
+  entities: string[];
+  scopes: string[];
+  start_date: string | null;
+  end_date: string | null;
+  signal_count: number;
+  max_deviation_pct: number;
+  max_anomaly_score: number;
+  headline: string;
+  evidence_summary?: string;
+  anomaly_indices: number[];
+}
+
 export interface Pack {
   type: string;
   schema_version: number | string;
@@ -130,6 +190,7 @@ export interface ArtifactsPayload {
   anomaly_summary: Record<string, unknown>;
   insights: InsightRecord[];
   grouping: { groups?: GroupRecord[] };
+  findings: Finding[];
   pack: Pack;
   region_performance: Record<string, unknown>[];
   product_performance: Record<string, unknown>[];
@@ -192,7 +253,16 @@ export interface RecommendationRecord {
   priority_score?: number;
   action_type: string;
   status: string;
+  description?: string;
+  problem_statement?: string;
+  why_it_matters?: string;
+  likely_drivers?: string[];
+  expected_benefit?: string;
   evidence_ids: string[];
+  evidence_strength?: number;
+  target_metric?: string;
+  target_entity?: string | null;
+  source_factors?: string[];
   [key: string]: unknown;
 }
 

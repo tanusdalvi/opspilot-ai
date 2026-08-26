@@ -401,11 +401,15 @@ class TestSchemaConstants:
         )
         assert EXPECTED_SUMMARY_KEYS == frozenset({"total_count", "by_priority", "by_action_type"})
 
-    def test_recommendation_record_has_exactly_17_fields(self):
-        assert len(RECOMMENDATION_KEYS) == 17
+    def test_recommendation_record_has_exactly_21_fields(self):
+        assert len(RECOMMENDATION_KEYS) == 21
         assert "requires_human_review" in RECOMMENDATION_KEYS
         assert "status" in RECOMMENDATION_KEYS
         assert "priority_score" in RECOMMENDATION_KEYS
+        assert "problem_statement" in RECOMMENDATION_KEYS
+        assert "why_it_matters" in RECOMMENDATION_KEYS
+        assert "likely_drivers" in RECOMMENDATION_KEYS
+        assert "expected_benefit" in RECOMMENDATION_KEYS
 
     def test_action_vocabulary_has_exactly_8_actions(self):
         assert len(ACTION_TYPES) == 8

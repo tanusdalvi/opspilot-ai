@@ -15,13 +15,17 @@ Error contract (never leaks internals or secrets):
 
 from __future__ import annotations
 
+import asyncio
 import threading
+import time as _time
+import uuid
 from typing import Any, Iterator
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from agent.gemini_client import DEFAULT_GEMINI_MODEL
 from app import exports, orchestrator
@@ -47,6 +51,9 @@ from backend.api.sessions import (
 logger = get_logger(__name__)
 
 SESSION_HEADER = "X-OpsPilot-Session"
+
+# In-memory upload job registry (process-local, keyed by upload_id).
+_UPLOAD_JOBS: dict[str, dict] = {}
 
 
 def session_dependency(
@@ -151,20 +158,46 @@ def demo_datasets() -> dict[str, Any]:
     return {"datasets": orchestrator.list_demo_datasets()}
 
 
-def _load_into_session(session: WorkspaceSession, df, name: str) -> dict:
+def _load_into_session(session: WorkspaceSession, df, name: str,
+                       source: str = "upload") -> dict:
     report = orchestrator.validate_dataset(df)
+    from services.schema_adapter import (
+        assess_and_adapt,
+        profile_columns,
+        report_payload,
+    )
+    from services.capability_service import build_capability_profile
+
+    kinds = profile_columns(df)
+    adapted_df, compatibility = assess_and_adapt(df, precomputed_kinds=kinds)
+    capability = build_capability_profile(df)
     from backend.api.sessions import reset_dataset
 
-    reset_dataset(session, df, name, report)
-    log_event(logger, "api_dataset_loaded", dataset=orchestrator._safe_dataset_name(name))
+    reset_dataset(
+        session, df, name, report,
+        adapted_df=adapted_df if compatibility.tier == "partial" else None,
+        compatibility=report_payload(compatibility),
+        capability_profile=capability.to_dict(),
+        source=source,
+    )
+    log_event(
+        logger, "api_dataset_loaded",
+        dataset=orchestrator._safe_dataset_name(name),
+        compatibility=compatibility.tier,
+        dataset_class=capability.dataset_class,
+        source=source,
+    )
     return {
         "dataset": {
             "name": name,
+            "source": source,
             "rows": int(len(df)),
             "columns": int(len(df.columns)),
             "memory_bytes": int(df.memory_usage(deep=True).sum()),
         },
         "validation_report": report,
+        "compatibility": report_payload(compatibility),
+        "capability_profile": capability.to_dict(),
         "analysis_status": "IDLE",
     }
 
@@ -176,15 +209,87 @@ def load_demo(body: LoadDemoRequest,
         df = orchestrator.load_demo_dataset(body.filename)
     except DataValidationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return _load_into_session(session, df, body.filename)
+    return _load_into_session(session, df, body.filename, source="demo")
 
 
 @app.post("/api/datasets/upload")
 async def upload(file: UploadFile = File(...),
                  session: WorkspaceSession = Depends(session_dependency)) -> dict:
     content = await file.read()
-    df = orchestrator.load_uploaded_dataset(file.filename or "", content)
-    return _load_into_session(session, df, file.filename or "")
+    # CPU-bound pandas work must not block the event loop.
+    df = await run_in_threadpool(
+        orchestrator.load_uploaded_dataset, file.filename or "", content
+    )
+    result = await run_in_threadpool(
+        _load_into_session, session, df, file.filename or ""
+    )
+    return result
+
+
+@app.post("/api/uploads")
+async def create_upload(
+    file: UploadFile = File(...),
+    session: WorkspaceSession = Depends(session_dependency),
+) -> dict:
+    upload_id = uuid.uuid4().hex[:12]
+    content = await file.read()
+    _UPLOAD_JOBS[upload_id] = {
+        "id": upload_id,
+        "filename": file.filename or "upload.csv",
+        "stage": "RECEIVED",
+        "progress": 0,
+        "result": None,
+        "error": None,
+        "started_at": _time.time(),
+    }
+    threading.Thread(
+        target=_process_upload_job,
+        args=(upload_id, file.filename or "upload.csv", content, session),
+        daemon=True,
+    ).start()
+    return {"upload_id": upload_id, "stage": "RECEIVED"}
+
+
+def _process_upload_job(
+    upload_id: str, filename: str, content: bytes, session: WorkspaceSession
+) -> None:
+    job = _UPLOAD_JOBS[upload_id]
+    try:
+        job["stage"] = "PARSING"
+        job["progress"] = 20
+        df = orchestrator.load_uploaded_dataset(filename, content)
+
+        job["stage"] = "VALIDATING"
+        job["progress"] = 40
+
+        job["stage"] = "PROFILING"
+        job["progress"] = 60
+
+        job["stage"] = "ADAPTING"
+        job["progress"] = 80
+        result = _load_into_session(session, df, filename)
+
+        job["stage"] = "READY"
+        job["progress"] = 100
+        job["result"] = result
+    except Exception as exc:
+        job["stage"] = "FAILED"
+        job["error"] = str(exc)
+
+
+@app.get("/api/uploads/{upload_id}")
+def get_upload_status(upload_id: str) -> dict:
+    job = _UPLOAD_JOBS.get(upload_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Upload job not found")
+    return {
+        "id": job["id"],
+        "filename": job["filename"],
+        "stage": job["stage"],
+        "progress": job["progress"],
+        "result": job["result"],
+        "error": job["error"],
+    }
 
 
 @app.get("/api/datasets/preview")
@@ -210,6 +315,16 @@ def analysis_run(body: AnalysisRunRequest,
         raise HTTPException(
             status_code=409,
             detail="No dataset is loaded. Load a dataset before running analysis.",
+        )
+    compatibility = session.compatibility or {}
+    if compatibility.get("tier") == "unsupported":
+        reasons = " ".join(compatibility.get("reasons") or [])
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This dataset cannot be analyzed: "
+                + (reasons or "it lacks the minimum structure OpsPilot needs.")
+            ),
         )
     if body.sensitivity not in orchestrator.VALID_SENSITIVITIES:
         raise HTTPException(

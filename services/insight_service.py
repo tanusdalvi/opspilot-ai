@@ -448,6 +448,11 @@ def _localization_for(
     return None if best is None else best[2]
 
 
+_METRIC_TO_AGG_COLUMN: dict[str, str] = {
+    "lead_time_days": "average_lead_time_days",
+}
+
+
 def _peer_profile(
     tables: _ContextTables, dimension: str, entity: str, metric: str
 ) -> dict[str, object] | None:
@@ -456,19 +461,26 @@ def _peer_profile(
     if frame is None or entity not in frame.index or len(frame) < 2:
         return None
     peers = frame.drop(index=entity)
+    agg_metric = _METRIC_TO_AGG_COLUMN.get(metric, metric)
 
     def median(column: str) -> float | None:
+        if column not in peers.columns:
+            return None
         values = peers[column].to_numpy(dtype=float)
         return float(np.median(values))
 
     medians = {column: median(column) for column in (
-        metric,
+        agg_metric,
         "units_sold",
         "cost",
         "average_lead_time_days",
         "profit_margin_pct",
     )}
-    own = {column: float(frame.loc[entity, column]) for column in medians}
+    own = {
+        column: float(frame.loc[entity, column])
+        for column in medians
+        if column in frame.columns
+    }
 
     def ratio(column: str) -> float | None:
         base = medians[column]
@@ -476,7 +488,7 @@ def _peer_profile(
             return None
         return _round(own[column] / base)
 
-    metric_ratio = ratio(metric)
+    metric_ratio = ratio(agg_metric) if agg_metric in medians else None
     units_ratio = ratio("units_sold")
     cost_ratio = ratio("cost")
 
@@ -580,7 +592,7 @@ def _factors_for(
                 }
             )
 
-        if metric == "revenue":
+        if metric != "units_sold" and "units_sold" in tables.metrics:
             units_z = z_row.get("units_sold")
             if units_z is not None and abs(units_z) < FACTOR_Z_THRESHOLD:
                 flatness = 1.0 - abs(units_z) / FACTOR_Z_THRESHOLD
@@ -591,7 +603,7 @@ def _factors_for(
                         "strength": _round(max(0.0, min(1.0, flatness))),
                         "evidence": (
                             f"units_sold z={_round(units_z)} below +/-{FACTOR_Z_THRESHOLD} "
-                            f"while revenue moved on {iso_date}"
+                            f"while {metric} moved on {iso_date}"
                         ),
                     }
                 )

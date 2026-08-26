@@ -62,7 +62,10 @@ SENSITIVITY_THRESHOLDS: dict[str, float] = {
     "high": 2.5,
 }
 
-# Metrics eligible for daily anomaly detection.
+# Canonical metric names used for the standard pipeline.
+# ``detect_anomalies`` may also analyse any additional numeric column
+# present in the working copy, but these are always included when
+# available.
 SUPPORTED_METRICS: frozenset[str] = frozenset(
     {"units_sold", "revenue", "cost", "lead_time_days"}
 )
@@ -89,6 +92,13 @@ ROBUST_Z_SCALE: float = 1.349
 SEVERITY_CRITICAL_MIN_SCORE: float = 85.0
 SEVERITY_HIGH_MIN_SCORE: float = 70.0
 SEVERITY_MEDIUM_MIN_SCORE: float = 50.0
+
+# Hard cap on the number of anomalies returned by detect_anomalies.
+# Hourly or sub-daily data can generate thousands of flagged points;
+# downstream explain_anomalies is O(n) per anomaly with O(n) inner
+# loops, so unbounded output causes multi-minute hangs on large data.
+# The cap keeps the most severe anomalies and discards the rest.
+MAX_ANOMALIES: int = 500
 
 
 # --- Private helpers --------------------------------------------------------
@@ -191,43 +201,18 @@ def _aggregate_sort_key(record: dict[str, object]) -> tuple[object, ...]:
 # --- Public API -------------------------------------------------------------
 
 
-def detect_metric_anomalies(
-    df: pd.DataFrame, metric: str, *, sensitivity: str = "medium"
+def _detect_metric_anomalies_core(
+    work: pd.DataFrame,
+    metric: str,
+    threshold: float,
 ) -> list[dict[str, object]]:
-    """Detect spike/drop anomalies in the daily totals of one metric.
+    """Core daily spike/drop detection on an already-prepared working copy.
 
-    For every observed date that has at least ``MIN_HISTORY_DAYS``
-    preceding observed points, the date's total is compared against the
-    trailing window of previous daily totals (which never includes the
-    candidate itself). A date is anomalous when the absolute z-score
-    against that window reaches the sensitivity threshold.
-
-    Args:
-        df: Operational DataFrame following the canonical schema. It is
-            never mutated.
-        metric: One of ``units_sold``, ``revenue``, ``cost``,
-            ``lead_time_days``.
-        sensitivity: ``low`` (threshold 3.5), ``medium`` (3.0), or
-            ``high`` (2.5). Higher sensitivity flags more dates.
-
-    Returns:
-        List of anomaly dictionaries sorted by date ascending. Each
-        record contains exactly ``type`` (``daily_spike`` or
-        ``daily_drop``), ``scope`` (always ``daily``), ``metric``,
-        ``entity`` (always ``None``), ``date`` (ISO string), ``value``,
-        ``expected_value``, ``deviation_pct``, ``score`` (0-100),
-        ``severity``, ``rule`` (always ``zscore_rolling``), and
-        ``details`` with ``z``, ``baseline_std``, and ``threshold``.
-        Datasets with fewer than eight unique dates yield an empty list.
-
-    Raises:
-        DataValidationError: If the dataset is unusable (see module
-            policy) or ``metric``/``sensitivity`` is invalid.
+    This is the validation-free internal variant used by
+    ``detect_anomalies`` when iterating over dynamically discovered
+    metrics.  The public ``detect_metric_anomalies`` wraps this with
+    input validation and ``_prepare_operational_data``.
     """
-    _validate_metric(metric)
-    threshold = _validate_sensitivity(sensitivity)
-    work = _prepare_operational_data(df)
-
     daily = _daily_series(work, metric)
     values = daily.to_numpy(dtype=float)
     dates = daily.index
@@ -268,55 +253,15 @@ def detect_metric_anomalies(
     return anomalies
 
 
-def detect_entity_anomalies(
-    df: pd.DataFrame,
+def _detect_entity_anomalies_core(
+    work: pd.DataFrame,
     dimension: str,
     metric: str,
-    *,
-    sensitivity: str = "medium",
 ) -> list[dict[str, object]]:
-    """Detect outlier entities in the full-period total of one metric.
+    """Core entity outlier detection on an already-prepared working copy.
 
-    The metric is summed per entity (``region`` or ``product``) over the
-    complete observed period. When at least four entities exist, Tukey
-    fences are built from the quartiles of those totals; an entity
-    outside ``[Q1 - 1.5 * IQR, Q3 + 1.5 * IQR]`` is flagged as an
-    outlier. A degenerate distribution (``IQR == 0``) yields no
-    anomalies.
-
-    Args:
-        df: Operational DataFrame following the canonical schema. It is
-            never mutated.
-        dimension: Either ``region`` or ``product``.
-        metric: One of ``units_sold``, ``revenue``, ``cost``,
-            ``lead_time_days``.
-        sensitivity: Validated for API consistency with the daily
-            detector; fence placement itself is fixed at ``1.5 * IQR``.
-
-    Returns:
-        List of anomaly dictionaries ordered by entity name ascending.
-        Each record contains exactly ``type``
-        (``entity_outlier_high`` above the upper fence,
-        ``entity_outlier_low`` below the lower fence), ``scope`` (the
-        requested dimension), ``metric``, ``entity``, ``date`` (always
-        ``None``), ``value``, ``expected_value`` (the median),
-        ``deviation_pct``, ``score`` (0-100, derived from a robust
-        z-score using the ``IQR / 1.349`` scale estimate), ``severity``,
-        ``rule`` (always ``iqr_fence``), and ``details`` with ``z``,
-        ``q1``, ``median``, ``q3``, ``iqr``, ``lower_fence``, and
-        ``upper_fence``. Datasets with fewer than four entities yield an
-        empty list.
-
-    Raises:
-        DataValidationError: If the dataset is unusable (see module
-            policy) or ``dimension``/``metric``/``sensitivity`` is
-            invalid.
+    Validation-free internal variant used by ``detect_anomalies``.
     """
-    _validate_dimension(dimension)
-    _validate_metric(metric)
-    _validate_sensitivity(sensitivity)
-    work = _prepare_operational_data(df)
-
     totals = work.groupby(dimension, sort=True)[metric].sum()
     if len(totals) < MIN_ENTITY_COUNT:
         return []
@@ -369,18 +314,134 @@ def detect_entity_anomalies(
     return anomalies
 
 
+def detect_metric_anomalies(
+    df: pd.DataFrame, metric: str, *, sensitivity: str = "medium"
+) -> list[dict[str, object]]:
+    """Detect spike/drop anomalies in the daily totals of one metric.
+
+    For every observed date that has at least ``MIN_HISTORY_DAYS``
+    preceding observed points, the date's total is compared against the
+    trailing window of previous daily totals (which never includes the
+    candidate itself). A date is anomalous when the absolute z-score
+    against that window reaches the sensitivity threshold.
+
+    Args:
+        df: Operational DataFrame following the canonical schema. It is
+            never mutated.
+        metric: One of ``units_sold``, ``revenue``, ``cost``,
+            ``lead_time_days``.
+        sensitivity: ``low`` (threshold 3.5), ``medium`` (3.0), or
+            ``high`` (2.5). Higher sensitivity flags more dates.
+
+    Returns:
+        List of anomaly dictionaries sorted by date ascending. Each
+        record contains exactly ``type`` (``daily_spike`` or
+        ``daily_drop``), ``scope`` (always ``daily``), ``metric``,
+        ``entity`` (always ``None``), ``date`` (ISO string), ``value``,
+        ``expected_value``, ``deviation_pct``, ``score`` (0-100),
+        ``severity``, ``rule`` (always ``zscore_rolling``), and
+        ``details`` with ``z``, ``baseline_std``, and ``threshold``.
+        Datasets with fewer than eight unique dates yield an empty list.
+
+    Raises:
+        DataValidationError: If the dataset is unusable (see module
+            policy) or ``metric``/``sensitivity`` is invalid.
+    """
+    _validate_metric(metric)
+    threshold = _validate_sensitivity(sensitivity)
+    work = _prepare_operational_data(df)
+    return _detect_metric_anomalies_core(work, metric, threshold)
+
+
+def detect_entity_anomalies(
+    df: pd.DataFrame,
+    dimension: str,
+    metric: str,
+    *,
+    sensitivity: str = "medium",
+) -> list[dict[str, object]]:
+    """Detect outlier entities in the full-period total of one metric.
+
+    The metric is summed per entity (``region`` or ``product``) over the
+    complete observed period. When at least four entities exist, Tukey
+    fences are built from the quartiles of those totals; an entity
+    outside ``[Q1 - 1.5 * IQR, Q3 + 1.5 * IQR]`` is flagged as an
+    outlier. A degenerate distribution (``IQR == 0``) yields no
+    anomalies.
+
+    Args:
+        df: Operational DataFrame following the canonical schema. It is
+            never mutated.
+        dimension: Either ``region`` or ``product``.
+        metric: One of ``units_sold``, ``revenue``, ``cost``,
+            ``lead_time_days``.
+        sensitivity: Validated for API consistency with the daily
+            detector; fence placement itself is fixed at ``1.5 * IQR``.
+
+    Returns:
+        List of anomaly dictionaries ordered by entity name ascending.
+        Each record contains exactly ``type``
+        (``entity_outlier_high`` above the upper fence,
+        ``entity_outlier_low`` below the lower fence), ``scope`` (the
+        requested dimension), ``metric``, ``entity``, ``date`` (always
+        ``None``), ``value``, ``expected_value`` (the median),
+        ``deviation_pct``, ``score`` (0-100, derived from a robust
+        z-score using the ``IQR / 1.349`` scale estimate), ``severity``,
+        ``rule`` (always ``iqr_fence``), and ``details`` with ``z``,
+        ``q1``, ``median``, ``q3``, ``iqr``, ``lower_fence``, and
+        ``upper_fence``. Datasets with fewer than four entities yield an
+        empty list.
+
+    Raises:
+        DataValidationError: If the dataset is unusable (see module
+            policy) or ``dimension``/``metric``/``sensitivity`` is
+            invalid.
+    """
+    _validate_dimension(dimension)
+    _validate_metric(metric)
+    _validate_sensitivity(sensitivity)
+    work = _prepare_operational_data(df)
+    return _detect_entity_anomalies_core(work, dimension, metric)
+
+
+def _discover_numeric_metrics(df: pd.DataFrame) -> list[str]:
+    """Discover numeric columns available for anomaly detection.
+
+    Inspects the working copy (post ``_prepare_operational_data``) and
+    returns a sorted list of columns that contain finite numeric data.
+    Canonical metrics are always included first (when present); any
+    additional numeric columns discovered are appended.
+    """
+    work = _prepare_operational_data(df)
+    numeric_cols: list[str] = []
+    for col in work.columns:
+        if col == "date":
+            continue
+        try:
+            values = pd.to_numeric(work[col], errors="coerce")
+            if values.notna().any() and bool(np.isfinite(values.dropna()).all()):
+                numeric_cols.append(col)
+        except (TypeError, ValueError):
+            continue
+    canonical = sorted(col for col in numeric_cols if col in SUPPORTED_METRICS)
+    extra = sorted(col for col in numeric_cols if col not in SUPPORTED_METRICS)
+    return canonical + extra
+
+
 def detect_anomalies(
     df: pd.DataFrame, *, sensitivity: str = "medium"
 ) -> dict[str, object]:
-    """Run every detector across all supported metrics and combine.
+    """Run every detector across all available metrics and combine.
 
-    For each of the four supported metrics this invokes
-    ``detect_metric_anomalies`` (daily scope) plus
+    Discovers numeric columns dynamically from the working copy rather
+    than relying on a hardcoded metric list.  For each discovered metric
+    this invokes ``detect_metric_anomalies`` (daily scope) plus
     ``detect_entity_anomalies`` for the ``region`` and ``product``
-    dimensions, merges all returned records without deduplication, and
-    sorts them deterministically: severity priority (``CRITICAL`` first,
-    then ``HIGH``, ``MEDIUM``, ``LOW``), higher score first, date
-    ascending, entity ascending, then metric/type as final tie breakers.
+    dimensions (when they exist), merges all returned records without
+    deduplication, and sorts them deterministically: severity priority
+    (``CRITICAL`` first, then ``HIGH``, ``MEDIUM``, ``LOW``), higher
+    score first, date ascending, entity ascending, then metric/type as
+    final tie breakers.
 
     Args:
         df: Operational DataFrame following the canonical schema. It is
@@ -392,27 +453,42 @@ def detect_anomalies(
         Dictionary with exactly ``anomalies`` (the combined, sorted
         records), ``total_count`` (int), ``by_severity`` (counts for all
         four severity constants; always present), ``sensitivity`` (the
-        requested level), and ``metrics_analyzed`` (the four supported
-        metric names in deterministic sorted order).
+        requested level), ``metrics_analyzed`` (the discovered metric
+        names in deterministic sorted order), and ``original_metric_names``
+        (mapping of canonical metric -> original column name when the
+        schema adapter preserved original names).
 
     Raises:
         DataValidationError: If the dataset is unusable (see module
             policy) or ``sensitivity`` is invalid.
     """
     _validate_sensitivity(sensitivity)
-    metrics = sorted(SUPPORTED_METRICS)
+    metrics = _discover_numeric_metrics(df)
+    threshold = SENSITIVITY_THRESHOLDS[sensitivity]
 
     combined: list[dict[str, object]] = []
+    work = _prepare_operational_data(df)
+    has_region = "region" in work.columns
+    has_product = "product" in work.columns
+
     for metric in metrics:
-        combined.extend(detect_metric_anomalies(df, metric, sensitivity=sensitivity))
-        combined.extend(
-            detect_entity_anomalies(df, "region", metric, sensitivity=sensitivity)
-        )
-        combined.extend(
-            detect_entity_anomalies(df, "product", metric, sensitivity=sensitivity)
-        )
+        if metric not in work.columns:
+            continue
+        combined.extend(_detect_metric_anomalies_core(work, metric, threshold))
+        if has_region:
+            combined.extend(
+                _detect_entity_anomalies_core(work, "region", metric)
+            )
+        if has_product:
+            combined.extend(
+                _detect_entity_anomalies_core(work, "product", metric)
+            )
 
     combined.sort(key=_aggregate_sort_key)
+
+    # Cap output to prevent O(n²) downstream processing on high-cardinality data.
+    if len(combined) > MAX_ANOMALIES:
+        combined = combined[:MAX_ANOMALIES]
 
     by_severity: dict[str, int] = {
         severity: 0

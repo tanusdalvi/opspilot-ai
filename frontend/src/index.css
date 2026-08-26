@@ -22,6 +22,13 @@
   --color-warn: #ffb020;
   --color-danger: #ff5d6c;
 
+  /* Interaction overlays — theme-aware layers replacing raw white/black
+     alpha utilities, which are invisible or muddy in the light theme. */
+  --color-faint: rgba(255, 255, 255, 0.03);
+  --color-hover: rgba(255, 255, 255, 0.055);
+  --color-active: rgba(255, 255, 255, 0.09);
+  --color-scrim: rgba(3, 7, 18, 0.6);
+
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
 }
@@ -41,6 +48,11 @@
   --color-ok: #12996b;
   --color-warn: #b97a08;
   --color-danger: #d43a4c;
+
+  --color-faint: rgba(22, 32, 58, 0.035);
+  --color-hover: rgba(22, 32, 58, 0.055);
+  --color-active: rgba(22, 32, 58, 0.09);
+  --color-scrim: rgba(15, 23, 42, 0.42);
 }
 
 html,

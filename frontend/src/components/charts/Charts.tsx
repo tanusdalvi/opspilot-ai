@@ -14,6 +14,7 @@ export function DivergingBars({
     itemStyle: { color: (value ?? 0) >= 0 ? theme.ok : theme.danger },
   }));
   const option = {
+    animation: theme.motionOK,
     grid: { left: 8, right: 24, top: 8, bottom: 8, containLabel: true },
     xAxis: {
       type: "value",
@@ -77,6 +78,8 @@ export function TrendArea({
   const theme = useChartTheme();
   const overlaySet = new Set(overlayDates);
   const option = {
+    animation: theme.motionOK,
+    animationDuration: 500,
     grid: { left: 12, right: 16, top: 28, bottom: 42, containLabel: true },
     tooltip: {
       trigger: "axis",
@@ -120,7 +123,7 @@ export function TrendArea({
           color: {
             type: "linear", x: 0, y: 0, x2: 0, y2: 1,
             colorStops: [
-              { offset: 0, color: `${theme.accent}38` },
+              { offset: 0, color: theme.accentSoft },
               { offset: 1, color: `${theme.accent}03` },
             ],
           },
@@ -157,8 +160,9 @@ export function GroupedBars({
   series: { name: string; values: number[] }[];
 }) {
   const theme = useChartTheme();
-  const palette = [theme.accent, "#7c5cff", theme.ok, theme.warn];
+  const palette = [theme.accent, theme.accent2, theme.ok, theme.warn];
   const option = {
+    animation: theme.motionOK,
     grid: { left: 8, right: 12, top: 30, bottom: 8, containLabel: true },
     tooltip: {
       trigger: "axis",
@@ -208,6 +212,7 @@ export function ScatterPlot({
 }) {
   const theme = useChartTheme();
   const option = {
+    animation: theme.motionOK,
     grid: { left: 8, right: 16, top: 16, bottom: 8, containLabel: true },
     tooltip: {
       trigger: "item",
@@ -259,6 +264,7 @@ export function HistogramChart({
 }) {
   const theme = useChartTheme();
   const option = {
+    animation: theme.motionOK,
     grid: { left: 8, right: 12, top: 16, bottom: 8, containLabel: true },
     tooltip: {
       trigger: "axis",
@@ -303,17 +309,20 @@ export function DonutChart({
   slices: { label: string; value: number }[];
 }) {
   const theme = useChartTheme();
+  // Theme-derived palette: solid semantic hues first, then alpha variants
+  // of the accents for extended series — no hard-coded hex values.
   const palette = [
     theme.accent,
-    "#7c5cff",
+    theme.accent2,
     theme.ok,
     theme.warn,
-    "#e879a0",
-    "#38bdf8",
-    "#f97350",
-    "#94a3b8",
+    theme.danger,
+    `${theme.accent}85`,
+    `${theme.accent2}85`,
+    theme.textMuted,
   ];
   const option = {
+    animation: theme.motionOK,
     tooltip: {
       trigger: "item",
       backgroundColor: theme.surface,

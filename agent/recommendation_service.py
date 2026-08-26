@@ -332,6 +332,9 @@ def match_playbook_candidates(insight: dict, anomaly: dict) -> list[dict]:
             else len(related_ids) + 1,
             "localization_note": None,
             "profile_note": None,
+            "anomaly_value": anomaly.get("value"),
+            "anomaly_expected_value": anomaly.get("expected_value"),
+            "anomaly_date": iso_date,
         }
 
     candidates: list[dict] = []
@@ -628,6 +631,154 @@ def _render_description(candidate: dict) -> str:
     return "; ".join(parts) + "."
 
 
+def _render_problem_statement(candidate: dict) -> str:
+    """Generate a concise, data-grounded problem statement from the candidate."""
+    label = metric_label(candidate.get("target_metric"))
+    entity = candidate.get("target_entity")
+    severity = str(candidate.get("severity", "LOW"))
+    deviation = float(candidate.get("deviation_pct", 0.0))
+    scope = str(candidate.get("scope", "dataset"))
+    date_window = candidate.get("date_window")
+    window_text = _render_window_text(date_window)
+
+    value = candidate.get("anomaly_value")
+    expected = candidate.get("anomaly_expected_value")
+    has_values = (
+        isinstance(value, (int, float))
+        and isinstance(expected, (int, float))
+        and not isinstance(value, bool)
+        and not isinstance(expected, bool)
+    )
+
+    if entity:
+        location = f"{entity} ({scope} level)"
+    elif scope == "dataset":
+        location = "the full dataset"
+    else:
+        location = f"{scope} level"
+
+    direction = "increased" if deviation > 0 else "decreased"
+    magnitude = f"{abs(deviation):.1f}%"
+
+    if has_values:
+        return (
+            f"A {severity.lower()}-severity {label.lower()} signal was detected in "
+            f"{location} {window_text}, where the metric {direction} by {magnitude} "
+            f"(observed {float(value):.2f}, expected {float(expected):.2f}) "
+            f"versus the expected baseline."
+        )
+    return (
+        f"A {severity.lower()}-severity {label.lower()} signal was detected in "
+        f"{location} {window_text}, where the metric {direction} by {magnitude} "
+        f"versus the expected baseline."
+    )
+
+
+def _render_why_it_matters(candidate: dict) -> str:
+    """Explain why this recommendation matters in concrete business terms."""
+    label = metric_label(candidate.get("target_metric"))
+    severity = str(candidate.get("severity", "LOW"))
+    deviation = float(candidate.get("deviation_pct", 0.0))
+    entity = candidate.get("target_entity")
+    deviation_mag = abs(deviation)
+
+    higher_is_adverse = candidate.get("target_metric") in ("cost", "lead_time_days")
+    is_adverse = (deviation > 0 and higher_is_adverse) or (deviation < 0 and not higher_is_adverse)
+
+    if entity:
+        subject = f"{entity}'s {label.lower()}"
+    else:
+        subject = f"The {label.lower()} signal"
+
+    if is_adverse:
+        impact = (
+            f"{subject} deviated {deviation_mag:.1f}% from the expected baseline, "
+            f"which could indicate deteriorating performance"
+        )
+    else:
+        impact = (
+            f"{subject} moved {deviation_mag:.1f}% from the expected baseline, "
+            f"which represents a positive movement"
+        )
+
+    urgency = {
+        "CRITICAL": "This requires immediate attention as the deviation is significant and may signal a systemic issue.",
+        "HIGH": "This warrants prompt investigation before the trend worsens.",
+        "MEDIUM": "This should be reviewed within the current operational cycle.",
+        "LOW": "This is worth monitoring but does not require immediate action.",
+    }.get(severity, "This should be reviewed when convenient.")
+
+    return f"{impact}. {urgency}"
+
+
+_FACTOR_DRIVER_MAP: dict[str, str] = {
+    "volume": "the data suggests elevated or unusual demand volume may be contributing",
+    "monetary": "the data suggests the shift is primarily driven by revenue or pricing changes",
+    "cost": "the data suggests unusual cost fluctuations may be a contributing factor",
+    "supply": "the data suggests supply-side constraints or longer lead times may be a contributing factor",
+    "price_margin": "the data suggests pricing pressure or margin compression may be involved",
+    "unattributed": "the data does not yet isolate a single primary factor",
+}
+
+
+def _render_likely_drivers(candidate: dict) -> list[str]:
+    """Extract likely drivers with cautious language grounded in the data."""
+    drivers: list[str] = []
+    source_factors = candidate.get("source_factors", [])
+
+    for factor in source_factors:
+        factor_str = str(factor)
+        mapped = _FACTOR_DRIVER_MAP.get(factor_str)
+        if mapped:
+            drivers.append(mapped)
+        elif factor_str:
+            drivers.append(f"the data suggests '{factor_str.replace('_', ' ')}' may be a contributing factor")
+
+    localization_note = candidate.get("localization_note")
+    if localization_note:
+        drivers.append(
+            f"a likely contributing factor is the localization pattern: {localization_note}"
+        )
+
+    profile_note = candidate.get("profile_note")
+    if profile_note:
+        drivers.append(
+            f"a likely contributing factor is the peer comparison: {profile_note}"
+        )
+
+    if not drivers:
+        drivers.append("further investigation is needed to identify contributing factors")
+
+    return drivers
+
+
+_ACTION_BENEFIT_MAP: dict[str, str] = {
+    "demand_capacity_review": "Aligning {label} planning with actual demand patterns could prevent future shortfalls or overcapacity for {target}.",
+    "revenue_operations_review": "Reviewing revenue operations for {label} could identify opportunities to recover or stabilize {target} revenue.",
+    "cost_variance_review": "Investigating cost drivers for {label} may reveal reducible expenses or process inefficiencies affecting {target}.",
+    "supplier_escalation_review": "Engaging with suppliers on {label} could resolve upstream bottlenecks affecting {target} delivery.",
+    "fulfillment_bottleneck_review": "Addressing the fulfillment bottleneck in {label} could improve {target} delivery times and customer satisfaction.",
+    "pricing_margin_review": "Reviewing pricing strategy for {label} may help restore or protect {target} margins.",
+    "entity_performance_review": "Targeted performance review for {target_entity} on {label} could isolate and address root causes.",
+    "manual_investigation": "Investigating the {label} signal further will help determine whether corrective action is needed for {target}.",
+}
+
+
+def _render_expected_benefit(candidate: dict) -> str:
+    """Describe a concrete expected benefit of addressing this recommendation."""
+    label = metric_label(candidate.get("target_metric"))
+    entity = candidate.get("target_entity")
+    action = str(candidate.get("action_type", "manual_investigation"))
+
+    target_text = entity if entity else "the affected scope"
+    template = _ACTION_BENEFIT_MAP.get(
+        action, "Addressing this {label} signal could help stabilize {target} operations."
+    )
+    return template.format(
+        label=label, target=target_text, target_entity=entity or "the affected entity"
+    )
+
+
 def _finalize_recommendation(
     candidate: dict, recommendation_id: str
 ) -> dict[str, object]:
@@ -640,6 +791,10 @@ def _finalize_recommendation(
         "action_type": str(candidate["action_type"]),
         "title": _render_title(candidate),
         "description": _render_description(candidate),
+        "problem_statement": _render_problem_statement(candidate),
+        "why_it_matters": _render_why_it_matters(candidate),
+        "likely_drivers": _render_likely_drivers(candidate),
+        "expected_benefit": _render_expected_benefit(candidate),
         "scope": str(candidate["scope"]),
         "target_entity": candidate.get("target_entity"),
         "target_metric": str(candidate["target_metric"]),

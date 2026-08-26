@@ -10,6 +10,7 @@ import {
   Upload,
 } from "lucide-react";
 import { api } from "../lib/api";
+import { METRIC_LABELS } from "../lib/labels";
 import { useWorkspace } from "../state/workspace";
 import { PageHeader, Panel, SectionHeading } from "../components/ui/Panel";
 import {
@@ -19,14 +20,15 @@ import {
 } from "../components/ui/Primitives";
 import { AnalysisProgress } from "../components/ui/AnalysisProgress";
 import { ValidationSummary } from "../components/ui/ValidationSummary";
+import { SegmentedControl } from "../components/ui/Controls";
 import { formatBytes, formatNumber } from "../lib/format";
-import type { DemoDataset } from "../lib/types";
+import type { DatasetInfo, DemoDataset } from "../lib/types";
 
 /** Must mirror core.constants.MAX_UPLOAD_BYTES (20 MiB). */
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 const ACCEPTED_EXTENSIONS = [".csv"];
 
-type UploadPhase = "idle" | "uploading" | "success" | "error";
+type UploadPhase = "idle" | "uploading" | "processing" | "success" | "error";
 
 interface UploadState {
   phase: UploadPhase;
@@ -36,13 +38,16 @@ interface UploadState {
 }
 
 export default function DataPage() {
-  const { system, artifacts, loadDemo, uploadDataset, runAnalysis } =
+  const { system, artifacts, loadDemo, uploadDataset, runAnalysis, runPending } =
     useWorkspace();
-  const [sensitivity, setSensitivity] = useState("medium");
+  const [sensitivity, setSensitivity] = useState<
+    "low" | "medium" | "high"
+  >("medium");
   const fileRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
   const [upload, setUpload] = useState<UploadState>({ phase: "idle" });
   const dataset = system?.dataset;
+  const compatibility = dataset?.compatibility ?? null;
   const report = (artifacts?.validation_report ?? null) as Record<
     string,
     unknown
@@ -105,6 +110,8 @@ export default function DataPage() {
     setUpload({ phase: "uploading", fileName: file.name, fileSize: file.size });
     try {
       await uploadDataset(file);
+      setUpload({ phase: "processing", fileName: file.name, fileSize: file.size });
+      await new Promise((resolve) => setTimeout(resolve, 1200));
       setUpload({ phase: "success", fileName: file.name, fileSize: file.size });
     } catch (error) {
       setUpload({
@@ -144,36 +151,66 @@ export default function DataPage() {
                   aria-hidden
                 />
               ))}
-            {(demoQuery.data?.datasets ?? []).map((entry) => (
-              <button
-                key={entry.name}
-                onClick={() => void loadDemo(entry.name)}
-                className="panel panel-hover flex w-full items-center justify-between px-4 py-3 text-left"
-              >
-                <span>
-                  <span className="block text-sm font-semibold text-text">
-                    {entry.name}
+            {(demoQuery.data?.datasets ?? []).map((entry) => {
+              const isActive =
+                system?.dataset?.name === entry.name &&
+                system?.dataset?.source === "demo";
+              return (
+                <button
+                  key={entry.name}
+                  onClick={() => void loadDemo(entry.name)}
+                  className={`panel flex w-full items-center justify-between px-4 py-3 text-left transition ${
+                    isActive
+                      ? "border-accent bg-accent/[0.08]"
+                      : "panel-hover"
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <span>
+                      <span className="block text-sm font-semibold text-text">
+                        {entry.name}
+                      </span>
+                      <span className="text-xs text-text-muted">
+                        Bundled demo dataset
+                        {typeof entry.rows === "number"
+                          ? ` · ${formatNumber(entry.rows)} rows`
+                          : entry.description
+                            ? ` · ${entry.description}`
+                            : ""}
+                      </span>
+                    </span>
+                    {isActive && (
+                      <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-ok" />
+                    )}
                   </span>
-                  <span className="text-xs text-text-muted">
-                    Bundled demo dataset
-                    {typeof entry.rows === "number"
-                      ? ` · ${formatNumber(entry.rows)} rows`
-                      : entry.description
-                        ? ` · ${entry.description}`
-                        : ""}
-                  </span>
-                </span>
-                <Badge tone="info" withIcon={false}>
-                  Demo
-                </Badge>
-              </button>
-            ))}
+                  <Badge tone="info" withIcon={false}>
+                    {isActive ? "Active" : "Demo"}
+                  </Badge>
+                </button>
+              );
+            })}
             {!demoQuery.isLoading &&
               (demoQuery.data?.datasets.length ?? 0) === 0 && (
                 <p className="text-xs text-text-muted">
                   No bundled demo datasets are available.
                 </p>
               )}
+            {demoQuery.isError && (
+              <div className="flex items-center justify-between gap-2 rounded-xl border border-danger/35 bg-danger/[0.07] px-3.5 py-3">
+                <span className="text-xs text-danger">
+                  Demo catalog could not be loaded
+                  {demoQuery.error instanceof Error
+                    ? ` — ${demoQuery.error.message}`
+                    : "."}
+                </span>
+                <Button
+                  variant="subtle"
+                  onClick={() => void demoQuery.refetch()}
+                >
+                  Retry
+                </Button>
+              </div>
+            )}
 
             {/* Drop zone */}
             <div
@@ -209,12 +246,12 @@ export default function DataPage() {
               className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed px-6 py-8 text-center transition ${
                 dragActive
                   ? "border-accent bg-accent/[0.08]"
-                  : "border-line-strong bg-white/[0.02] hover:border-accent/50"
+                  : "border-line-strong bg-faint hover:border-accent/40 hover:bg-accent/[0.03]"
               }`}
             >
               <Upload
-                size={18}
-                className={`mb-2 ${dragActive ? "text-accent" : "text-text-2"}`}
+                size={22}
+                className={`mb-2 transition-colors ${dragActive ? "text-accent" : "text-text-2"}`}
                 aria-hidden
               />
               <p className="text-sm font-medium text-text-2">
@@ -246,14 +283,14 @@ export default function DataPage() {
                 role="status"
                 aria-live="polite"
                 className={`flex items-start gap-2.5 rounded-xl border px-3.5 py-3 ${
-                  upload.phase === "uploading"
+                  upload.phase === "uploading" || upload.phase === "processing"
                     ? "border-accent/35 bg-accent/[0.07]"
                     : upload.phase === "success"
                       ? "border-ok/35 bg-ok/[0.07]"
                       : "border-danger/40 bg-danger/[0.08]"
                 }`}
               >
-                {upload.phase === "uploading" ? (
+                {upload.phase === "uploading" || upload.phase === "processing" ? (
                   <span
                     className="mt-0.5 inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-accent/30 border-t-accent"
                     aria-hidden
@@ -285,6 +322,11 @@ export default function DataPage() {
                       Uploading and validating…
                     </p>
                   )}
+                  {upload.phase === "processing" && (
+                    <p className="text-xs text-text-2">
+                      Processing dataset — validating and understanding columns…
+                    </p>
+                  )}
                   {upload.phase === "success" && (
                     <p className="text-xs text-ok">
                       Uploaded — it is now the active dataset. Run the analysis
@@ -314,6 +356,14 @@ export default function DataPage() {
             />
           ) : (
             <>
+              <div className="mb-3 flex items-center gap-2">
+                <Badge
+                  tone={dataset.source === "demo" ? "info" : "warn"}
+                  withIcon={false}
+                >
+                  {dataset.source === "demo" ? "Demo" : "Upload"}
+                </Badge>
+              </div>
               <dl className="grid grid-cols-2 gap-x-6 gap-y-4 text-sm">
                 <Identity label="File" value={dataset.name} wide mono />
                 <Identity label="Rows" value={formatNumber(dataset.rows)} mono />
@@ -328,17 +378,25 @@ export default function DataPage() {
                   />
                 )}
               </dl>
-              <div className="col-span-2 mt-4 flex items-center gap-2 rounded-lg border border-ok/30 bg-ok/[0.07] px-3 py-2">
-                <CalendarRange size={14} className="shrink-0 text-ok" aria-hidden />
-                <span className="text-xs font-semibold text-ok">
-                  Validation passed — ready for analysis
-                  {report &&
-                  typeof report.warning_count === "number" &&
-                  report.warning_count > 0
-                    ? ` · ${report.warning_count} data warning${report.warning_count === 1 ? "" : "s"} noted`
-                    : " · no data issues detected"}
-                </span>
-              </div>
+              {compatibility && compatibility.tier !== "unsupported" ? (
+                <div className="col-span-2 mt-4 flex items-center gap-2 rounded-lg border border-ok/30 bg-ok/[0.07] px-3 py-2">
+                  <CalendarRange size={14} className="shrink-0 text-ok" aria-hidden />
+                  <span className="text-xs font-semibold text-ok">
+                    Validation passed — ready for analysis
+                    {report &&
+                    typeof report.warning_count === "number" &&
+                    report.warning_count > 0
+                      ? ` · ${report.warning_count} data warning${report.warning_count === 1 ? "" : "s"} noted`
+                      : " · no data issues detected"}
+                  </span>
+                </div>
+              ) : null}
+              {compatibility && (
+                <CompatibilityPanel compatibility={compatibility} />
+              )}
+              {dataset.capability_profile && (
+                <CapabilityProfilePanel profile={dataset.capability_profile} />
+              )}
               <Link
                 to="/explorer"
                 className="mt-3 inline-block text-xs font-semibold text-accent hover:underline"
@@ -357,36 +415,46 @@ export default function DataPage() {
             caption="One deterministic pipeline pass: KPIs, comparison, anomalies, insights, evidence."
           />
           <div className="flex flex-wrap items-center gap-3">
-            <label className="flex items-center gap-2 text-sm text-text-2">
+            <div className="flex items-center gap-2 text-sm text-text-2">
               Sensitivity
-              <select
+              <SegmentedControl
+                ariaLabel="Detection sensitivity"
                 value={sensitivity}
-                onChange={(e) => setSensitivity(e.target.value)}
-                className="rounded-lg border border-line-strong bg-bg-soft px-3 py-2 text-sm text-text"
-              >
-                {["low", "medium", "high"].map((level) => (
-                  <option key={level} value={level}>
-                    {level}
-                  </option>
-                ))}
-              </select>
-            </label>
+                onChange={setSensitivity}
+                options={[
+                  { value: "low", label: "Low" },
+                  { value: "medium", label: "Medium" },
+                  { value: "high", label: "High" },
+                ]}
+              />
+            </div>
             <Button
-              disabled={!dataset || running}
+              disabled={
+                !dataset ||
+                running ||
+                runPending ||
+                compatibility?.tier === "unsupported"
+              }
               onClick={() => void runAnalysis(sensitivity)}
             >
-              <Play size={14} /> Run / Refresh Analysis
+              <Play size={14} />
+              {running || runPending ? "Analyzing…" : "Run / Refresh Analysis"}
             </Button>
-            {system?.artifacts_ready && !running && (
+            {compatibility?.tier === "unsupported" && (
+              <span className="text-xs font-semibold text-danger">
+                Analysis unavailable for this dataset — see the reason above.
+              </span>
+            )}
+            {(system?.artifacts_ready || artifacts) && !running && !runPending && (
               <Link to="/analytics" className="ml-auto">
-                <Button variant="ghost">Go to Analytics</Button>
+                <Button variant="ghost">View Results</Button>
               </Link>
             )}
           </div>
 
-          {(running || lastRunDurationMs !== null) && (
+          {(running || runPending || lastRunDurationMs !== null) && (
             <AnalysisProgress
-              running={running}
+              running={running || runPending}
               datasetReady={dataset != null}
               startedAt={analysisStartedAt}
               durationMs={lastRunDurationMs}
@@ -406,7 +474,7 @@ export default function DataPage() {
           )}
 
           {report && !running && (
-            <details className="mt-4 rounded-xl border border-line bg-white/[0.02] px-4 py-3">
+            <details className="mt-4 rounded-xl border border-line bg-faint px-4 py-3">
               <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wider text-text-muted">
                 Validation detail
               </summary>
@@ -443,3 +511,249 @@ function Identity({
     </div>
   );
 }
+
+const TIER_PRESENTATION: Record<
+  string,
+  { label: string; tone: "ok" | "warn" | "danger"; blurb: string }
+> = {
+  full: {
+    label: "Full compatibility",
+    tone: "ok",
+    blurb: "Every operational field is present — complete analytics.",
+  },
+  partial: {
+    label: "Partial compatibility",
+    tone: "warn",
+    blurb:
+      "Your columns were mapped onto OpsPilot's operational schema so the standard analysis can run.",
+  },
+  unsupported: {
+    label: "Unsupported",
+    tone: "danger",
+    blurb: "This dataset lacks the minimum structure required for analysis.",
+  },
+};
+
+function CompatibilityPanel({
+  compatibility,
+}: {
+  compatibility: NonNullable<DatasetInfo["compatibility"]>;
+}) {
+  const tier =
+    TIER_PRESENTATION[compatibility.tier] ?? TIER_PRESENTATION.unsupported;
+  const mappingEntries = Object.entries(compatibility.mapping ?? {});
+  const synthesized = new Set(compatibility.synthesized ?? []);
+  const droppedRows = compatibility.dropped_rows ?? 0;
+
+  if (compatibility.tier === "full") {
+    return (
+      <p className="mt-3 text-xs text-text-muted">
+        Dataset compatibility: <span className="font-semibold text-ok">Full</span>{" "}
+        — all operational fields recognized.
+      </p>
+    );
+  }
+
+  return (
+    <div
+      className={`col-span-2 mt-4 rounded-xl border px-3.5 py-3 ${
+        tier.tone === "danger"
+          ? "border-danger/35 bg-danger/[0.07]"
+          : "border-warn/30 bg-warn/[0.06]"
+      }`}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={tier.tone} withIcon={false}>
+          {tier.label}
+        </Badge>
+        <span className="text-xs text-text-2">{tier.blurb}</span>
+      </div>
+
+      {compatibility.tier === "unsupported" ? (
+        <ul className="mt-2 space-y-1">
+          {(compatibility.reasons ?? []).map((reason) => (
+            <li key={reason} className="flex gap-1.5 text-xs text-text-2">
+              <span aria-hidden className="text-danger">
+                ✕
+              </span>
+              {reason}
+            </li>
+          ))}
+          <li className="pt-1 text-xs text-text-muted">
+            Minimum requirement: one date/time column and at least one numeric
+            column. The bundled demo dataset shows the full supported schema.
+          </li>
+        </ul>
+      ) : (
+        <>
+          {mappingEntries.length > 0 && (
+            <div className="mt-2.5">
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-text-muted">
+                Column mapping applied
+              </p>
+              <ul className="mt-1.5 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
+                {mappingEntries.map(([field, source]) =>
+                  synthesized.has(field) ? null : (
+                    <li key={field} className="flex items-center gap-1.5">
+                      <CheckCircle2 size={11} className="shrink-0 text-ok" aria-hidden />
+                      <span className="text-text-2">
+                        <span className="font-semibold text-text">{source}</span>
+                        {" analyzed as "}
+                        {METRIC_LABELS[field] ?? field}
+                      </span>
+                    </li>
+                  ),
+                )}
+                {[...synthesized]
+                  .filter((field) => field !== "region" && field !== "product")
+                  .map((field) => (
+                    <li key={field} className="flex items-center gap-1.5">
+                      <AlertCircle size={11} className="shrink-0 text-warn" aria-hidden />
+                      <span className="text-text-2">
+                        {METRIC_LABELS[field] ?? field}: not provided —
+                        excluded from results
+                      </span>
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          )}
+          {droppedRows > 0 && (
+            <p className="num mt-2 text-[11px] text-warn">
+              {droppedRows} row{droppedRows === 1 ? "" : "s"} dropped during
+              cleaning (unparseable dates or non-numeric values).
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+const CLASS_LABELS: Record<string, { label: string; tone: "ok" | "warn" | "danger"; description: string }> = {
+  A: {
+    label: "Time-series operational dataset",
+    tone: "ok",
+    description:
+      "Contains date, numeric, and categorical data. Full trend analysis, anomaly detection, and comparisons available.",
+  },
+  B: {
+    label: "Structured dataset without timestamps",
+    tone: "ok",
+    description:
+      "Contains numeric and categorical data but no date column. Distribution analysis, segment comparisons, and outlier detection available. Time-based trends are not possible.",
+  },
+  C: {
+    label: "Numeric dataset without timestamps",
+    tone: "warn",
+    description:
+      "Contains only numeric data. Statistical distributions, outlier detection, and metric relationships available. No categorical breakdowns or time trends.",
+  },
+  D: {
+    label: "Categorical dataset",
+    tone: "warn",
+    description:
+      "Contains date and categorical data but no numeric columns. Category frequency analysis available. Quantitative analysis is limited.",
+  },
+  E: {
+    label: "Cannot analyze",
+    tone: "danger",
+    description:
+      "The dataset lacks the minimum structure needed for meaningful analysis. Add numeric columns or a date column.",
+  },
+};
+
+const CAPABILITY_LABELS: Record<string, string> = {
+  time_series_analysis: "Time-series analysis",
+  anomaly_detection: "Anomaly detection",
+  trend_analysis: "Trend analysis",
+  period_comparison: "Period comparison",
+  distribution_analysis: "Distribution analysis",
+  segment_comparison: "Segment comparison",
+  outlier_detection: "Outlier detection",
+  correlation_analysis: "Correlation analysis",
+  category_frequency: "Category frequency",
+  visualization: "Visualization",
+  finding_generation: "Finding generation",
+  recommendation_generation: "Recommendation generation",
+};
+
+function CapabilityProfilePanel({
+  profile,
+}: {
+  profile: import("../lib/types").CapabilityProfile;
+}) {
+  const presentation = CLASS_LABELS[profile.dataset_class] ?? CLASS_LABELS.E;
+  const capabilities = Object.entries(profile.capabilities)
+    .filter(([, enabled]) => enabled)
+    .map(([key]) => CAPABILITY_LABELS[key] ?? key.replace(/_/g, " "));
+  const unavailable = (profile.unavailable_capabilities ?? [])
+    .map((key) => CAPABILITY_LABELS[key] ?? key.replace(/_/g, " "));
+
+  return (
+    <div
+      className={`col-span-2 mt-4 rounded-xl border px-3.5 py-3 ${
+        presentation.tone === "danger"
+          ? "border-danger/35 bg-danger/[0.07]"
+          : presentation.tone === "warn"
+            ? "border-warn/30 bg-warn/[0.06]"
+            : "border-ok/30 bg-ok/[0.07]"
+      }`}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={presentation.tone} withIcon={false}>
+          {presentation.label}
+        </Badge>
+        <span className="text-xs text-text-2">{presentation.description}</span>
+      </div>
+
+      <ul className="mt-2 space-y-1">
+        {profile.classification_reasons.map((reason) => (
+          <li key={reason} className="flex gap-1.5 text-xs text-text-2">
+            <span aria-hidden className={presentation.tone === "danger" ? "text-danger" : "text-ok"}>
+              {presentation.tone === "danger" ? "✕" : "✓"}
+            </span>
+            {reason}
+          </li>
+        ))}
+      </ul>
+
+      {capabilities.length > 0 && (
+        <div className="mt-2.5">
+          <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-text-muted">
+            Available analyses
+          </p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {capabilities.map((cap) => (
+              <span
+                key={cap}
+                className="inline-flex items-center gap-1 rounded-md border border-ok/30 bg-ok/[0.08] px-2 py-0.5 text-[10px] font-medium text-ok"
+              >
+                {cap}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {unavailable.length > 0 && (
+        <div className="mt-2.5">
+          <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-text-muted">
+            Unavailable analyses
+          </p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {unavailable.map((cap) => (
+              <span
+                key={cap}
+                className="inline-flex items-center gap-1 rounded-md border border-line-strong bg-faint px-2 py-0.5 text-[10px] font-medium text-text-muted"
+              >
+                {cap}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+

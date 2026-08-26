@@ -40,8 +40,8 @@ export function LifecycleRail({
                   done
                     ? "border-ok/50 bg-ok/15 text-ok"
                     : active
-                      ? "border-accent bg-accent/20 text-text shadow-[0_0_14px_rgba(91,140,255,0.5)]"
-                      : "border-line bg-white/[0.03] text-text-muted"
+                      ? "border-accent bg-accent/20 text-text shadow-md shadow-accent/40"
+                      : "border-line bg-faint text-text-muted"
                 } ${blocked && !reachable ? "opacity-45" : ""}`}
               >
                 {done ? (

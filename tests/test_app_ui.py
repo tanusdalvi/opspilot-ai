@@ -5,6 +5,10 @@ navigation shell spec (grouped, Material icons, no emoji), and idle
 boot smoke runs for every redesigned page. Functional behavior remains
 covered by the Phase 8-10B suites; these tests protect the Phase 11
 presentation contracts only.
+
+NOTE: Streamlit pages (app/pages/) have been removed during the React/FastAPI
+productization. These tests are skipped until the Streamlit UI is restored
+or the tests are migrated to the React frontend.
 """
 
 from __future__ import annotations
@@ -14,7 +18,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from streamlit.testing.v1 import AppTest
+
+# Streamlit pages (app/pages/) have been removed; skip entire module.
+pytestmark = pytest.mark.skip(
+    reason="Streamlit pages removed during React/FastAPI productization"
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:

@@ -28,13 +28,15 @@ export function metricLabel(raw: unknown): string {
   return METRIC_LABELS[key] ?? metricTitle(key);
 }
 
-/** Metrics with a daily trend line in artifacts.daily_trends. */
-export const TREND_METRICS = [
-  "revenue",
-  "units_sold",
-  "cost",
-  "profit",
-] as const;
+/** @deprecated Use availableTrendMetrics() instead. */
+export const TREND_METRICS = ["revenue", "units_sold", "cost", "profit"] as const;
+
+/** Derive available trend metrics from daily_trends columns. */
+export function availableTrendMetrics(dailyTrends: Record<string, unknown>[] | null | undefined): string[] {
+  if (!dailyTrends || dailyTrends.length === 0) return [];
+  const metricColumns = Object.keys(dailyTrends[0]).filter(k => k !== "date");
+  return metricColumns;
+}
 
 // --- KPI cards ---------------------------------------------------------------------------------------
 
@@ -113,7 +115,7 @@ export function kpiMeta(key: string): KpiMeta {
     KPI_META[key] ?? {
       title: metricTitle(key),
       description: "",
-      kind: "money-like",
+      kind: key.includes("pct") ? "percent" : key.includes("days") ? "days" : key.includes("count") || key.startsWith("total") || key.startsWith("unique") || key.startsWith("average_daily") ? "count" : "money-like",
     }
   );
 }
@@ -166,6 +168,63 @@ export function signalTitle(record: {
   metric?: unknown;
 }): string {
   return `${anomalyTypeLabel(record.type)} · ${metricLabel(record.metric)}`;
+}
+
+const TYPE_DIRECTION: Record<string, "up" | "down"> = {
+  daily_spike: "up",
+  entity_outlier_high: "up",
+  daily_drop: "down",
+  entity_outlier_low: "down",
+};
+
+/** ISO date -> "15 Dec 2025"; returns the input when not parseable. */
+function shortDate(value: unknown): string | null {
+  const raw = String(value ?? "");
+  const date = new Date(raw);
+  if (!/^\d{4}-\d{2}-\d{2}/.test(raw) || Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return date.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+/**
+ * One-sentence factual reading of a signal: what moved, which way,
+ * by how much, and against what comparison. Uses only record fields —
+ * no diagnosis, no cause, no recommendation.
+ */
+export function signalInterpretation(
+  record: AnomalyLike & { deviation_pct?: unknown },
+): string {
+  const type = String(record.type ?? "");
+  const direction = TYPE_DIRECTION[type] ?? "up";
+  const verb = direction === "up" ? "above" : "below";
+  const moved = direction === "up" ? "rose" : "fell";
+  const deviation = Math.abs(Number(record.deviation_pct ?? 0)).toFixed(1);
+  const metric = metricLabel(record.metric);
+  const subject = record.entity
+    ? `${String(record.entity)}'s ${metric.toLowerCase()}`
+    : `Daily ${metric.toLowerCase()}`;
+  switch (type) {
+    case "entity_outlier_high":
+    case "entity_outlier_low":
+      return `${subject} sits ${deviation}% ${verb} comparable peers for the same period.`;
+    default:
+      return `${subject} ${moved} ${deviation}% ${verb} its expected operating range${
+        shortDate(record.date) ? ` on ${shortDate(record.date)}` : ""
+      }.`;
+  }
+}
+
+/** Minimal structural contract shared by anomaly records across pages. */
+export interface AnomalyLike {
+  type?: unknown;
+  metric?: unknown;
+  entity?: unknown;
+  date?: unknown;
 }
 
 // --- Evidence pack ------------------------------------------------------------------------------------

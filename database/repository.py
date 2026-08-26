@@ -230,6 +230,7 @@ def validate_review_event(event: object) -> None:
 def _recommendation_row_values(record: dict, plan_id: int | None) -> dict[str, Any]:
     """Map a validated recommendation dict onto model column values."""
     window = record["date_window"]
+    likely = record.get("likely_drivers")
     return {
         "plan_id": plan_id,
         "recommendation_id": record["recommendation_id"],
@@ -255,13 +256,18 @@ def _recommendation_row_values(record: dict, plan_id: int | None) -> dict[str, A
         "evidence_strength": float(record["evidence_strength"]),
         "requires_human_review": bool(record["requires_human_review"]),
         "status": record["status"],
+        "problem_statement": record.get("problem_statement"),
+        "why_it_matters": record.get("why_it_matters"),
+        "likely_drivers_json": None if likely is None else _canonical_json(likely, "likely_drivers"),
+        "expected_benefit": record.get("expected_benefit"),
     }
 
 
 def _row_to_recommendation(row: RecommendationRecord) -> dict:
-    """Reconstruct the exact 17-key Phase 5 record from a stored row."""
+    """Reconstruct the 21-key Phase 5 record from a stored row."""
     window_text = row.date_window_json
-    return {
+    likely_text = getattr(row, "likely_drivers_json", None)
+    result = {
         "recommendation_id": row.recommendation_id,
         "priority": row.priority,
         "priority_score": float(row.priority_score),
@@ -279,7 +285,12 @@ def _row_to_recommendation(row: RecommendationRecord) -> dict:
         "evidence_strength": float(row.evidence_strength),
         "requires_human_review": bool(row.requires_human_review),
         "status": row.status,
+        "problem_statement": getattr(row, "problem_statement", None),
+        "why_it_matters": getattr(row, "why_it_matters", None),
+        "likely_drivers": [] if likely_text is None else json.loads(likely_text),
+        "expected_benefit": getattr(row, "expected_benefit", None),
     }
+    return result
 
 
 def _row_to_event(row: ReviewEventRecord) -> dict:

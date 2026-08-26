@@ -84,10 +84,28 @@ class TestPipelineGate:
         artifacts = orchestrator.run_pipeline(demo_df)
         assert isinstance(artifacts, orchestrator.AnalysisArtifacts)
 
-    def test_invalid_dataframe_is_rejected_before_analysis(self):
+    def test_missing_metric_is_synthesized(self):
+        """Missing canonical metrics are synthesized (set to 0), not rejected."""
         broken = make_valid_frame().drop(columns=["revenue"])
-        with pytest.raises(DataValidationError, match="MISSING_COLUMNS"):
-            orchestrator.run_pipeline(broken)
+        artifacts = orchestrator.run_pipeline(broken)
+        assert isinstance(artifacts, orchestrator.AnalysisArtifacts)
+        report = artifacts.validation_report
+        assert report["valid"] is True
+
+    def test_no_numeric_columns_rejected(self):
+        """Datasets with no numeric columns at all are rejected."""
+        no_numeric = pd.DataFrame({
+            "date": ["2026-01-01", "2026-01-02"],
+            "label": ["a", "b"],
+        })
+        with pytest.raises(DataValidationError):
+            orchestrator.run_pipeline(no_numeric)
+
+    def test_empty_dataset_rejected(self):
+        """Empty datasets are rejected."""
+        empty = pd.DataFrame()
+        with pytest.raises(DataValidationError):
+            orchestrator.run_pipeline(empty)
 
     def test_negative_values_block_analysis(self):
         frame = make_valid_frame()

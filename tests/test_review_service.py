@@ -80,6 +80,10 @@ def make_rec(**over: object) -> dict:
         "evidence_strength": 0.7,
         "requires_human_review": True,
         "status": RECOMMENDATION_PENDING,
+        "problem_statement": "Revenue showed an anomalous spike on 2025-01-05.",
+        "why_it_matters": "Unplanned revenue variance may indicate data quality issues.",
+        "likely_drivers": ["monetary", "seasonal"],
+        "expected_benefit": "Investigating this could prevent future revenue misreporting.",
     }
     base.update(over)
     return base

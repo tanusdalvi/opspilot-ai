@@ -97,6 +97,7 @@ class TestErrorSanitization:
 # --- History page renders plan provenance ---------------------------------------------------
 
 
+@pytest.mark.skip(reason="Streamlit pages removed during React/FastAPI productization")
 class TestHistoryPageAppTest:
     @pytest.fixture()
     def seeded_app(self, tmp_path, monkeypatch):

@@ -1,15 +1,7 @@
-"""Signal Posture — the Overview command-center score (Phase 11B).
+"""Signal Posture — Streamlit-rendered donut ring (Phase 11B).
 
-OpsPilot has no business "health score" service, so none is invented
-here. Instead this module defines ONE explicit presentation
-transformation over deterministic detector output:
-
-    posture = 100 - min(100, sum(severity_weight * count))
-
-The weights are fixed presentation constants (not tuned to any
-dataset); they only translate existing severity counts into a 0-100
-attention scale. Every input comes from ``artifacts.anomaly_summary``
-— with no artifacts there is no score at all.
+The pure scoring logic lives in ``core.posture``. This module adds
+Streamlit-specific HTML rendering helpers (donut ring, icon markup).
 """
 
 from __future__ import annotations
@@ -17,22 +9,8 @@ from __future__ import annotations
 from app.ui.icons import escape_label, icon_html
 from app.ui.theme import severity_color
 
-# Fixed presentation weights per anomaly severity. They encode how much
-# one detected signal of each class should pull the attention scale down;
-# they are never derived from, or tuned against, the data itself.
-SEVERITY_WEIGHTS: dict[str, int] = {
-    "CRITICAL": 25,
-    "HIGH": 12,
-    "MEDIUM": 5,
-    "LOW": 2,
-}
-
-_BANDS: tuple[tuple[int, str, str], ...] = (
-    # minimum score -> (label, tone)
-    (80, "STEADY", "success"),
-    (60, "MODERATE ATTENTION", "warning"),
-    (0, "NEEDS ATTENTION", "danger"),
-)
+# Re-export pure logic so existing Streamlit page imports keep working.
+from core.posture import SEVERITY_WEIGHTS, posture_band, posture_score  # noqa: F401
 
 _TONE_HEX = {
     "success": "var(--ops-success)",
@@ -40,23 +18,6 @@ _TONE_HEX = {
     "danger": "var(--ops-danger)",
     "accent": "var(--ops-accent)",
 }
-
-
-def posture_score(by_severity: dict) -> int:
-    """Deterministic 0-100 attention scale from severity counts."""
-    penalty = sum(
-        SEVERITY_WEIGHTS.get(str(severity).upper(), 2) * int(count or 0)
-        for severity, count in (by_severity or {}).items()
-    )
-    return max(0, 100 - min(100, penalty))
-
-
-def posture_band(score: int) -> tuple[str, str]:
-    """Map a posture score to its ``(label, tone)`` band."""
-    for minimum, label, tone in _BANDS:
-        if score >= minimum:
-            return label, tone
-    return _BANDS[-1][1], _BANDS[-1][2]
 
 
 def posture_ring(score: int, label: str, tone: str) -> str:

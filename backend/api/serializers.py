@@ -71,6 +71,35 @@ def preview_payload(df: pd.DataFrame | None, limit: int = 500) -> dict[str, Any]
     }
 
 
+def _wire_pack(pack: dict) -> dict:
+    """Frontend view of the evidence pack.
+
+    The full in-process pack feeds the server-side AI investigation.
+    Over the wire, sections already serialized at the artifacts top
+    level (anomalies, insights, groups, performers, metric contexts)
+    are omitted — they would otherwise double the payload without
+    adding information. Everything the interface reads (identity,
+    parameters, citable evidence index, KPIs, period changes) stays.
+    """
+    return {
+        "type": pack.get("type"),
+        "schema_version": pack.get("schema_version"),
+        "parameters": pack.get("parameters"),
+        "kpis": pack.get("kpis"),
+        "period_comparison": pack.get("period_comparison"),
+        "evidence_index": pack.get("evidence_index"),
+        "_omitted_sections": [
+            "context",
+            "top_performers",
+            "bottom_performers",
+            "anomalies",
+            "insights",
+            "groups",
+            "narrative_instructions",
+        ],
+    }
+
+
 def artifacts_payload(artifacts: orchestrator.AnalysisArtifacts) -> dict[str, Any]:
     """Project one AnalysisArtifacts bundle onto the wire format."""
     pack = artifacts.pack
@@ -85,7 +114,8 @@ def artifacts_payload(artifacts: orchestrator.AnalysisArtifacts) -> dict[str, An
         "anomaly_summary": artifacts.anomaly_summary,
         "insights": artifacts.insights,
         "grouping": artifacts.grouping,
-        "pack": pack,
+        "findings": artifacts.findings,
+        "pack": _wire_pack(pack),
         "region_performance": df_records(artifacts.region_performance),
         "product_performance": df_records(artifacts.product_performance),
         "daily_trends": df_records(artifacts.daily_trends),
@@ -97,14 +127,14 @@ def artifacts_payload(artifacts: orchestrator.AnalysisArtifacts) -> dict[str, An
 def _posture(artifacts: orchestrator.AnalysisArtifacts) -> dict[str, Any] | None:
     """Signal Posture via the existing Phase 11B formula (adapter reuse).
 
-    ``app.ui.posture`` defines the one presentation transformation over
-    detector output; it is imported lazily because its module pulls the
-    Streamlit theme constants. The formula itself is NOT re-implemented.
+    ``core.posture`` defines the one presentation transformation over
+    detector output with no Streamlit dependency. The formula itself is
+    NOT re-implemented.
     """
     if getattr(artifacts, "anomaly_summary", None) is None:
         return None
     try:
-        from app.ui.posture import posture_band, posture_score
+        from core.posture import posture_band, posture_score
 
         by_severity = (
             artifacts.anomaly_summary.get("by_severity")
@@ -128,10 +158,13 @@ def system_payload(session) -> dict[str, Any]:
     if session.df is not None:
         dataset = {
             "name": session.dataset_name,
+            "source": getattr(session, "dataset_source", "upload"),
             "rows": int(len(session.df)),
             "columns": int(len(session.df.columns)),
             "memory_bytes": int(session.df.memory_usage(deep=True).sum()),
             "date_coverage": _date_coverage(session.df),
+            "compatibility": getattr(session, "compatibility", None),
+            "capability_profile": getattr(session, "capability_profile", None),
         }
     artifacts_ready = session.status == ANALYSIS_READY and session.artifacts is not None
     return {

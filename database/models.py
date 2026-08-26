@@ -76,6 +76,10 @@ class RecommendationRecord(Base):
     evidence_strength: Mapped[float] = mapped_column(Float, nullable=False)
     requires_human_review: Mapped[bool] = mapped_column(Boolean, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    problem_statement: Mapped[str | None] = mapped_column(Text, nullable=True)
+    why_it_matters: Mapped[str | None] = mapped_column(Text, nullable=True)
+    likely_drivers_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_benefit: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ReviewEventRecord(Base):

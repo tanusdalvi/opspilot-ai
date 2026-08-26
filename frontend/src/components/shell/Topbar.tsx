@@ -1,19 +1,20 @@
-import { Menu, Monitor, Moon, Search, Sun } from "lucide-react";
+import { Database, Menu, Monitor, Moon, Search, Sun } from "lucide-react";
+import { useLocation } from "react-router-dom";
 import { useWorkspace } from "../../state/workspace";
 import { useTheme, type ThemePreference } from "../../state/theme";
 import { Badge } from "../ui/Primitives";
 
 const TITLES: [RegExp, string, string][] = [
-  [/^\/$/, "Command Center", "Operational overview"],
-  [/^\/data/, "Data", "Dataset workspace"],
-  [/^\/explorer/, "Data Explorer", "Visual dataset exploration"],
-  [/^\/analytics/, "Analytics", "Analytical workspace"],
-  [/^\/anomalies/, "Anomalies", "Signal wall"],
-  [/^\/insights/, "Insights", "Interpreted signals"],
-  [/^\/evidence/, "Evidence", "Investigation workspace"],
-  [/^\/recommendations/, "Recommendations", "Actionable decisions"],
-  [/^\/review/, "Human Review", "Decision console"],
-  [/^\/history/, "History", "Audit timeline"],
+  [/^\/$/, "Overview", "What needs your attention"],
+  [/^\/data/, "Data Workspace", "Load and prepare datasets"],
+  [/^\/explorer/, "Data Explorer", "Explore your dataset visually"],
+  [/^\/analytics/, "Analytics", "Trends, comparisons, and drill-downs"],
+  [/^\/anomalies/, "Findings & Signals", "Operational issues detected"],
+  [/^\/insights/, "Insights", "Deep signal analysis"],
+  [/^\/evidence/, "Evidence", "Supporting data and investigation"],
+  [/^\/recommendations/, "Recommendations", "Suggested operational actions"],
+  [/^\/review/, "Review Decisions", "Approve or reject recommendations"],
+  [/^\/history/, "History", "Audit trail of all decisions"],
 ];
 
 export function Topbar({
@@ -24,7 +25,8 @@ export function Topbar({
   onPalette: () => void;
 }) {
   const { system } = useWorkspace();
-  const match = TITLES.find(([pattern]) => pattern.test(window.location.pathname));
+  const location = useLocation();
+  const match = TITLES.find(([pattern]) => pattern.test(location.pathname));
   const [, title, caption] = match ?? ["", "OpsPilot AI", ""];
 
   return (
@@ -42,6 +44,19 @@ export function Topbar({
         <p className="hidden text-[11px] text-text-muted sm:block">{caption}</p>
       </div>
 
+      {/* Active dataset — always visible context for every number on screen */}
+      {system?.dataset && (
+        <div
+          className="ml-2 hidden min-w-0 items-center gap-1.5 rounded-full border border-line bg-faint px-2.5 py-1 md:flex lg:ml-4"
+          title={`Active dataset: ${system.dataset.name}`}
+        >
+          <Database size={11} className="shrink-0 text-accent" aria-hidden />
+          <span className="max-w-[160px] truncate text-[11px] font-medium text-text-2">
+            {system.dataset.name}
+          </span>
+        </div>
+      )}
+
       <div className="ml-auto flex items-center gap-2">
         {system?.analysis_running && (
           <Badge tone="info" withIcon={false}>
@@ -49,9 +64,11 @@ export function Topbar({
             Analyzing
           </Badge>
         )}
-        <Badge tone={system?.ai_available ? "ok" : "muted"} withIcon={false}>
-          AI {system?.ai_available ? "Ready" : "Offline"}
-        </Badge>
+        <span className="hidden sm:inline-flex">
+          <Badge tone={system?.ai_available ? "ok" : "muted"} withIcon={false}>
+            AI {system?.ai_available ? "Ready" : "Offline"}
+          </Badge>
+        </span>
         <ThemeSwitcher />
         <button
           onClick={onPalette}
@@ -83,7 +100,7 @@ function ThemeSwitcher() {
     <div
       role="radiogroup"
       aria-label="Color theme"
-      className="hidden overflow-hidden rounded-lg border border-line md:flex"
+      className="flex overflow-hidden rounded-lg border border-line"
     >
       {THEME_OPTIONS.map(({ value, label, icon: Icon }) => (
         <button

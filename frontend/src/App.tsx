@@ -9,17 +9,19 @@ import {
   CommandPalette,
   useCommandPalette,
 } from "./components/shell/CommandPalette";
+import { ErrorBoundary } from "./components/ui/ErrorBoundary";
 import Overview from "./pages/Overview";
 import DataPage from "./pages/DataPage";
-import Anomalies from "./pages/Anomalies";
-import Insights from "./pages/Insights";
 import Evidence from "./pages/Evidence";
 import Review from "./pages/Review";
+import ActionCenter from "./pages/ActionCenter";
 
-/** Chart-heavy routes are split so ECharts only loads when visited. */
+/** Heavy chart/analysis routes are lazy-loaded. */
 const Analytics = lazy(() => import("./pages/Analytics"));
 const Explorer = lazy(() => import("./pages/Explorer"));
 const Recommendations = lazy(() => import("./pages/Recommendations"));
+const Anomalies = lazy(() => import("./pages/Anomalies"));
+const Insights = lazy(() => import("./pages/Insights"));
 const History = lazy(() => import("./pages/History"));
 
 function RouteFallback() {
@@ -28,6 +30,24 @@ function RouteFallback() {
       <span className="skeleton h-4 w-4 rounded-full" aria-hidden />
       Loading workspace…
     </div>
+  );
+}
+
+/** Wraps a page component in an ErrorBoundary with a page-specific fallback. */
+function PageBoundary({
+  name,
+  children,
+}: {
+  name: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <ErrorBoundary
+      fallbackTitle={`${name} could not load`}
+      fallbackBody={`An error occurred while rendering the ${name} page. You can retry or navigate to another page.`}
+    >
+      {children}
+    </ErrorBoundary>
   );
 }
 
@@ -63,13 +83,37 @@ export default function App() {
                 className="mx-auto max-w-[1440px]"
               >
                 <Routes location={location}>
-                  <Route path="/" element={<Overview />} />
-                  <Route path="/data" element={<DataPage />} />
+                  <Route
+                    path="/"
+                    element={
+                      <PageBoundary name="Overview">
+                        <Overview />
+                      </PageBoundary>
+                    }
+                  />
+                  <Route
+                    path="/action-center"
+                    element={
+                      <PageBoundary name="Action Center">
+                        <ActionCenter />
+                      </PageBoundary>
+                    }
+                  />
+                  <Route
+                    path="/data"
+                    element={
+                      <PageBoundary name="Data">
+                        <DataPage />
+                      </PageBoundary>
+                    }
+                  />
                   <Route
                     path="/explorer"
                     element={
                       <Suspense fallback={<RouteFallback />}>
-                        <Explorer />
+                        <PageBoundary name="Explorer">
+                          <Explorer />
+                        </PageBoundary>
                       </Suspense>
                     }
                   />
@@ -77,27 +121,73 @@ export default function App() {
                     path="/analytics"
                     element={
                       <Suspense fallback={<RouteFallback />}>
-                        <Analytics />
+                        <PageBoundary name="Analytics">
+                          <Analytics />
+                        </PageBoundary>
                       </Suspense>
                     }
                   />
-                  <Route path="/anomalies" element={<Anomalies />} />
-                  <Route path="/insights" element={<Insights />} />
-                  <Route path="/evidence" element={<Evidence />} />
+                  <Route
+                    path="/anomalies"
+                    element={
+                      <Suspense fallback={<RouteFallback />}>
+                        <PageBoundary name="Findings & Signals">
+                          <Anomalies />
+                        </PageBoundary>
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="/insights"
+                    element={
+                      <Suspense fallback={<RouteFallback />}>
+                        <PageBoundary name="Insights">
+                          <Insights />
+                        </PageBoundary>
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="/evidence"
+                    element={
+                      <PageBoundary name="Evidence">
+                        <Evidence />
+                      </PageBoundary>
+                    }
+                  />
                   <Route
                     path="/recommendations"
                     element={
                       <Suspense fallback={<RouteFallback />}>
-                        <Recommendations />
+                        <PageBoundary name="Recommendations">
+                          <Recommendations />
+                        </PageBoundary>
                       </Suspense>
                     }
                   />
-                  <Route path="/review" element={<Review />} />
+                  <Route
+                    path="/review/:recommendationId"
+                    element={
+                      <PageBoundary name="Review">
+                        <Review />
+                      </PageBoundary>
+                    }
+                  />
+                  <Route
+                    path="/review"
+                    element={
+                      <PageBoundary name="Review">
+                        <Review />
+                      </PageBoundary>
+                    }
+                  />
                   <Route
                     path="/history"
                     element={
                       <Suspense fallback={<RouteFallback />}>
-                        <History />
+                        <PageBoundary name="History">
+                          <History />
+                        </PageBoundary>
                       </Suspense>
                     }
                   />

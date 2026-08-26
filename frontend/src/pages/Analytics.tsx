@@ -6,35 +6,69 @@ import { PageHeader, Panel, SectionHeading } from "../components/ui/Panel";
 import { Button, EmptyState, SkeletonPanel } from "../components/ui/Primitives";
 import { SegmentedControl } from "../components/ui/Controls";
 import { DivergingBars, GroupedBars, TrendArea } from "../components/charts/Charts";
-import { metricLabel, periodChangeLabel, TREND_METRICS } from "../lib/labels";
-
-type TrendMetric = (typeof TREND_METRICS)[number];
-
-const METRIC_OPTIONS = TREND_METRICS.map((m) => ({
-  value: m,
-  label: metricLabel(m),
-}));
+import { metricLabel, periodChangeLabel } from "../lib/labels";
 
 export default function Analytics() {
   const { system, artifacts } = useWorkspace();
-  const [metric, setMetric] = useState<TrendMetric>("revenue");
-  const trends = (artifacts?.daily_trends ?? []) as Record<string, unknown>[];
+
+  const trends = useMemo(
+    () => (artifacts?.daily_trends ?? []) as Record<string, unknown>[],
+    [artifacts],
+  );
+
+  /** Dynamically derive available numeric metric columns from daily_trends. */
+  const availableMetrics = useMemo(() => {
+    if (!trends.length) return [] as string[];
+    const keys = Object.keys(trends[0]);
+    const dateKey =
+      keys.find((k) => k.toLowerCase() === "date") ?? keys[0];
+    return keys.filter((k) => {
+      if (k === dateKey) return false;
+      const sample = trends.find((r) => r[k] !== undefined && r[k] !== null);
+      return sample !== undefined && Number.isFinite(Number(sample[k]));
+    });
+  }, [trends]);
+
+  const [metric, setMetric] = useState<string>("");
+
+  /** Snap to first available metric when the list changes. */
+  const activeMetric = useMemo(() => {
+    if (availableMetrics.length === 0) return null;
+    if (availableMetrics.includes(metric)) return metric;
+    return availableMetrics[0];
+  }, [availableMetrics, metric]);
+
+  const metricOptions = useMemo(
+    () => availableMetrics.map((m) => ({ value: m, label: metricLabel(m) })),
+    [availableMetrics],
+  );
 
   /** Exact-match column resolution against real daily_trends columns. */
   const { dateKey, valueKey } = useMemo(() => {
-    if (!trends.length) return { dateKey: "date", valueKey: metric };
+    if (!trends.length || !activeMetric) return { dateKey: "date", valueKey: null as string | null };
     const keys = Object.keys(trends[0]);
     const date =
       keys.find((k) => k.toLowerCase() === "date") ?? keys[0];
     const value =
-      keys.find((k) => k !== date && k === metric) ??
-      keys.find((k) => k !== date && k.startsWith(metric)) ??
-      metric;
+      keys.find((k) => k !== date && k === activeMetric) ??
+      keys.find((k) => k !== date && k.startsWith(activeMetric)) ??
+      null;
     return { dateKey: date, valueKey: value };
-  }, [trends, metric]);
+  }, [trends, activeMetric]);
 
-  const dates = trends.map((row) => String(row[dateKey] ?? ""));
-  const values = trends.map((row) => Number(row[valueKey] ?? 0));
+  const { dates, values } = useMemo(() => {
+    if (!valueKey) return { dates: [] as string[], values: [] as number[] };
+    const outDates: string[] = [];
+    const outValues: number[] = [];
+    for (const row of trends) {
+      const numeric = Number(row[valueKey]);
+      if (!Number.isFinite(numeric)) continue;
+      outDates.push(String(row[dateKey] ?? ""));
+      outValues.push(numeric);
+    }
+    return { dates: outDates, values: outValues };
+  }, [trends, dateKey, valueKey]);
+
   const anomalyDates = useMemo(
     () => [
       ...new Set(
@@ -45,6 +79,9 @@ export default function Analytics() {
     ],
     [artifacts],
   );
+
+  const hasRegion = Boolean(artifacts?.region_performance?.length);
+  const hasProduct = Boolean(artifacts?.product_performance?.length);
 
   if (!system?.artifacts_ready && !system?.analysis_running) {
     return (
@@ -76,15 +113,17 @@ export default function Analytics() {
 
       <Panel className="p-5">
         <SectionHeading
-          title={`${metricLabel(valueKey)} · daily trend`}
+          title={valueKey ? `${metricLabel(valueKey)} · daily trend` : "Daily trend"}
           caption="Brush or scroll-zoom to focus a window; amber markers are detected anomaly dates."
           actions={
-            <SegmentedControl
-              ariaLabel="Trend metric"
-              options={METRIC_OPTIONS}
-              value={metric}
-              onChange={(next) => setMetric(next)}
-            />
+            metricOptions.length > 0 ? (
+              <SegmentedControl
+                ariaLabel="Trend metric"
+                options={metricOptions}
+                value={activeMetric ?? ""}
+                onChange={(next) => setMetric(next)}
+              />
+            ) : undefined
           }
         />
         {running ? (
@@ -94,11 +133,26 @@ export default function Analytics() {
           </div>
         ) : !artifacts ? (
           <SkeletonPanel lines={5} />
+        ) : trends.length === 0 ? (
+          <p className="py-10 text-center text-sm text-text-2">
+            This dataset does not have daily trend data for charting.
+          </p>
+        ) : availableMetrics.length === 0 ? (
+          <p className="py-10 text-center text-sm text-text-2">
+            Daily trend rows exist but contain no numeric metric columns — the
+            trend chart requires at least one numeric field besides the date.
+          </p>
+        ) : dates.length === 0 ? (
+          <p className="py-10 text-center text-sm text-text-2">
+            This dataset has no dated daily history for{" "}
+            {metricLabel(activeMetric)} — the trend chart needs a date column
+            plus that metric. The period comparison below still applies.
+          </p>
         ) : (
           <TrendArea
             dates={dates}
             values={values}
-            metricLabel={metricLabel(valueKey)}
+            metricLabel={metricLabel(valueKey ?? activeMetric)}
             overlayDates={anomalyDates}
           />
         )}
@@ -121,19 +175,23 @@ export default function Analytics() {
           )}
         </Panel>
 
-        <DimensionDrillDown
-          title="Region drill-down"
-          caption="Deterministic per-region aggregates from the same pipeline pass."
-          rows={artifacts?.region_performance}
-          nameField="region"
-        />
+        {hasRegion && (
+          <DimensionDrillDown
+            title="Region drill-down"
+            caption="Deterministic per-region aggregates from the same pipeline pass."
+            rows={artifacts!.region_performance}
+            nameField="region"
+          />
+        )}
 
-        <DimensionDrillDown
-          title="Product drill-down"
-          caption="Deterministic per-product aggregates from the same pipeline pass."
-          rows={artifacts?.product_performance}
-          nameField="product"
-        />
+        {hasProduct && (
+          <DimensionDrillDown
+            title="Product drill-down"
+            caption="Deterministic per-product aggregates from the same pipeline pass."
+            rows={artifacts!.product_performance}
+            nameField="product"
+          />
+        )}
       </div>
     </div>
   );
@@ -147,11 +205,11 @@ function DimensionDrillDown({
 }: {
   title: string;
   caption: string;
-  rows?: Record<string, unknown>[];
+  rows: Record<string, unknown>[];
   nameField: string;
 }) {
   const series = useMemo(() => {
-    if (!rows?.length) return null;
+    if (!rows.length) return null;
     const keys = Object.keys(rows[0]);
     const nameKey =
       keys.find((k) => k.toLowerCase() === nameField) ??
@@ -162,10 +220,7 @@ function DimensionDrillDown({
         k !== nameKey &&
         rows.some((r) => Number.isFinite(Number(r[k]))),
     );
-    const valueKey =
-      valueKeys.find((k) => k === "total_revenue") ??
-      valueKeys.find((k) => k.includes("revenue")) ??
-      valueKeys[0];
+    const valueKey = valueKeys[0];
     if (!valueKey) return null;
     return {
       categories: rows.map((r) => String(r[nameKey] ?? "")),
@@ -177,13 +232,16 @@ function DimensionDrillDown({
   return (
     <Panel className="p-5">
       <SectionHeading title={title} caption={caption} />
-      {series ? (
+      {rows.length === 0 || !series ? (
+        <p className="py-8 text-center text-sm text-text-2">
+          No per-{nameField} breakdown is available for this dataset — the
+          pipeline did not produce a numeric {nameField} aggregation.
+        </p>
+      ) : (
         <GroupedBars
           categories={series.categories}
           series={[{ name: series.name, values: series.values }]}
         />
-      ) : (
-        <SkeletonPanel lines={4} />
       )}
     </Panel>
   );

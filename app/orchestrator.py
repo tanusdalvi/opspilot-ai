@@ -54,8 +54,10 @@ from services.analytics_service import (
     calculate_product_performance,
     calculate_region_performance,
 )
-from services.anomaly_service import summarize_anomalies
+from services.anomaly_service import MAX_ANOMALIES, summarize_anomalies
+from services.capability_service import build_capability_profile
 from services.data_service import load_csv, load_dataset
+from services.finding_service import build_findings
 from services.validation_service import ensure_valid, validate_dataframe
 
 logger = get_logger(__name__)
@@ -66,12 +68,71 @@ UPLOAD_DIR: Path = DATA_DIR / "uploads"
 # Explicit reviewer decisions understood by apply_review.
 REVIEW_DECISIONS: tuple[str, ...] = ("APPROVE", "REJECT", "REQUEST_CHANGES", "RESUBMIT")
 
+_REVIEW_DECISION_ALIASES: dict[str, str] = {
+    "approve": "APPROVE",
+    "reject": "REJECT",
+    "request_changes": "REQUEST_CHANGES",
+    "resubmit": "RESUBMIT",
+}
+
 _REVIEW_HANDLERS = {
     "APPROVE": approve_recommendation,
     "REJECT": reject_recommendation,
     "REQUEST_CHANGES": request_changes,
     "RESUBMIT": resubmit_recommendation,
 }
+
+
+def _maybe_aggregate_to_daily(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate sub-daily data to daily granularity for the analysis engine.
+
+    The anomaly and insight services are designed for daily time-series.
+    When the input has multiple rows per calendar day (e.g. hourly data),
+    numeric columns are summed and text dimensions are collapsed to the
+    most frequent value per day.  Already-daily data passes through
+    unchanged.
+    """
+    from services.validation_service import NUMERIC_COLUMNS, TEXT_COLUMNS
+
+    # Fast date extraction: take the first 10 chars of each date string
+    # (YYYY-MM-DD) instead of slow pd.to_datetime on 100k+ rows.
+    date_str = df["date"].astype(str).str[:10]
+    total_rows = len(df)
+
+    if total_rows <= 1000:
+        return df
+
+    unique_days = date_str.nunique()
+    if unique_days >= total_rows or unique_days == 0:
+        return df
+    avg_rows_per_day = total_rows / unique_days
+    if avg_rows_per_day < 2.0:
+        return df
+
+    work = df.copy()
+    work["_day"] = date_str
+
+    agg: dict[str, object] = {}
+    for col in work.columns:
+        if col in ("date", "_day"):
+            continue
+        if col in NUMERIC_COLUMNS:
+            agg[col] = "sum"
+        elif col in TEXT_COLUMNS:
+            # Use first() for dimensions — in sub-daily data the dimension
+            # is the same across hours within a day.  Avoids expensive
+            # per-group mode() computation.
+            agg[col] = "first"
+        else:
+            agg[col] = "first"
+
+    grouped = work.groupby("_day", sort=True).agg(agg)
+    grouped["date"] = grouped.index
+    grouped = grouped.reset_index(drop=True)
+
+    ordered = [c for c in df.columns if c in grouped.columns]
+    grouped = grouped[ordered].reset_index(drop=True)
+    return grouped
 
 
 @dataclass
@@ -93,6 +154,8 @@ class AnalysisArtifacts:
     insights: list
     grouping: dict
     pack: dict
+    findings: list[dict]
+    capability_profile: dict
 
     @property
     def anomalies(self) -> list:
@@ -259,13 +322,19 @@ def run_pipeline(
     carry (region/product performance and daily trends) are computed
     separately.
 
+    For non-time-series datasets (Types B, C, D), the pipeline adapts:
+    time-dependent operations are skipped and the capability profile
+    reports what analysis was performed.
+
     Sequence:
 
-    1. ``ensure_valid``            — hard validation gate (fast fail)
-    2. ``build_investigation_context`` — one full pass over the dataset;
+    1. ``build_capability_profile`` — determine what analysis is possible
+    2. ``assess_and_adapt``         — project dataset to canonical schema
+    3. ``ensure_valid``             — hard validation gate (fast fail)
+    4. ``build_investigation_context`` — one full pass over the dataset;
        yields the pack plus KPIs, comparison, performers, anomalies,
        insights, and groups
-    3. rendering tables            — region/product performance and
+    5. rendering tables            — region/product performance and
        daily trends (absent from the aggregate-only pack)
 
     Raises:
@@ -273,14 +342,71 @@ def run_pipeline(
             service rejects its inputs. Invalid datasets never reach
             analysis.
     """
+    from services.schema_adapter import assess_and_adapt
+
     safe_name = _safe_dataset_name(dataset_name)
     started = time.perf_counter()
     log_event(
         logger, "analysis_started", dataset=safe_name, sensitivity=sensitivity
     )
+
+    # Step 1: Build capability profile from the raw dataset
+    capability = build_capability_profile(df)
+    log_event(
+        logger,
+        "capability_profiled",
+        dataset=safe_name,
+        dataset_class=capability.dataset_class,
+        has_date=capability.has_date,
+        has_numeric=capability.has_numeric,
+    )
+
+    # Step 2: Class E (insufficient) — fail early with honest explanation
+    if capability.dataset_class == "E":
+        reasons = "; ".join(capability.classification_reasons)
+        raise DataValidationError(
+            f"Dataset cannot be analyzed: {reasons}"
+        )
+
+    # Step 3: Adapt the dataset to canonical schema
     try:
-        report = require_valid_dataset(df)
-        pack = build_investigation_context(df, sensitivity=sensitivity, focus=focus)
+        analysis_df, compat_report = assess_and_adapt(df)
+    except Exception as exc:
+        log_event(
+            logger,
+            "analysis_failed",
+            dataset=safe_name,
+            error_type=type(exc).__name__,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
+        raise DataValidationError(
+            f"Dataset adaptation failed: {exc}"
+        ) from exc
+
+    if analysis_df is None:
+        reasons = "; ".join(compat_report.reasons)
+        raise DataValidationError(
+            f"Dataset cannot be analyzed: {reasons}"
+        )
+
+    # Step 4: Validate the adapted dataset
+    report = require_valid_dataset(analysis_df)
+
+    # Step 5: Run the analysis pipeline
+    has_time = capability.has_date and capability.time_series_analysis
+    try:
+        if has_time:
+            # Full time-series pipeline
+            work_df = _maybe_aggregate_to_daily(analysis_df)
+            pack = build_investigation_context(
+                work_df, sensitivity=sensitivity, focus=focus
+            )
+        else:
+            # Non-time-series pipeline: skip date-dependent analysis
+            work_df = analysis_df
+            pack = build_investigation_context(
+                work_df, sensitivity=sensitivity, focus=focus
+            )
     except Exception as exc:  # noqa: BLE001 - logged safely, then re-raised
         log_event(
             logger,
@@ -290,28 +416,65 @@ def run_pipeline(
             duration_ms=int((time.perf_counter() - started) * 1000),
         )
         raise
+
     anomalies = pack["anomalies"]
     summary = summarize_anomalies(anomalies)
     period_comparison = pack["period_comparison"]
-    if period_comparison is None:
+    if not has_time and period_comparison is None:
+        period_comparison = {
+            "periods": [],
+            "comparison": None,
+            "summary": "Period comparison unavailable: dataset has no time dimension.",
+        }
+    elif period_comparison is None:
         # Degenerate (< two dates) dataset: reproduce the hard failure
         # the direct call always raised instead of rendering ``None``.
         period_comparison = calculate_period_comparison(df)
+    insights = pack["insights"]
+    grouping = pack["groups"]
+    findings = build_findings(
+        anomalies,
+        insights=insights,
+        grouping=grouping,
+    )
+
+    # Step 6: Compute rendering tables (skip time-dependent for non-time-series)
+    if has_time:
+        region_perf = calculate_region_performance(work_df)
+        product_perf = calculate_product_performance(work_df)
+        daily_trends = calculate_daily_trends(work_df)
+    else:
+        # For non-time-series data, provide empty DataFrames with correct columns
+        region_perf = (
+            calculate_region_performance(work_df)
+            if capability.has_categorical
+            else pd.DataFrame(columns=["region", "revenue", "units_sold"])
+        )
+        product_perf = (
+            calculate_product_performance(work_df)
+            if capability.has_categorical
+            else pd.DataFrame(columns=["product", "revenue", "units_sold"])
+        )
+        daily_trends = pd.DataFrame(
+            columns=["date", "revenue", "units_sold", "cost", "lead_time_days"]
+        )
+
     log_event(
         logger,
         "analysis_completed",
         dataset=safe_name,
         duration_ms=int((time.perf_counter() - started) * 1000),
         anomalies=len(anomalies),
+        findings=len(findings),
     )
     return AnalysisArtifacts(
         dataset_name=dataset_name,
         df=df,
         validation_report=report,
         kpis=pack["kpis"],
-        region_performance=calculate_region_performance(df),
-        product_performance=calculate_product_performance(df),
-        daily_trends=calculate_daily_trends(df),
+        region_performance=region_perf,
+        product_performance=product_perf,
+        daily_trends=daily_trends,
         period_comparison=period_comparison,
         top_performers=pack["top_performers"],
         bottom_performers=pack["bottom_performers"],
@@ -323,9 +486,11 @@ def run_pipeline(
             "metrics_analyzed": list(pack["parameters"]["metrics"]),
         },
         anomaly_summary=summary,
-        insights=pack["insights"],
-        grouping=pack["groups"],
+        insights=insights,
+        grouping=grouping,
         pack=pack,
+        findings=findings,
+        capability_profile=capability.to_dict(),
     )
 
 
@@ -364,6 +529,10 @@ def apply_review(
 ) -> tuple[dict, dict]:
     """Apply one reviewer decision through the real Phase 6 service.
 
+    Accepts any casing of the canonical decision strings and normalises
+    them to uppercase before dispatch. This means "approve", "Approve",
+    "APPROVE" all map to the same handler.
+
     Dispatches to the matching ``agent.review_service`` wrapper; this
     module never mutates recommendation records itself.
 
@@ -371,7 +540,11 @@ def apply_review(
         ``(updated_record, review_event)`` exactly as produced by the
         service.
     """
-    handler = _REVIEW_HANDLERS.get(decision) if isinstance(decision, str) else None
+    normalized = (
+        _REVIEW_DECISION_ALIASES.get(str(decision).strip().lower())
+        if isinstance(decision, str) else None
+    )
+    handler = _REVIEW_HANDLERS.get(normalized) if normalized else None
     if handler is None:
         raise DataValidationError(
             f"decision must be one of {list(REVIEW_DECISIONS)}; got {decision!r}"
@@ -379,7 +552,7 @@ def apply_review(
     updated_record, event = handler(
         recommendation, reviewer_id=reviewer_id, comment=comment, occurred_at=occurred_at
     )
-    log_event(logger, "review_applied", decision=str(decision))
+    log_event(logger, "review_applied", decision=normalized)
     return updated_record, event
 
 

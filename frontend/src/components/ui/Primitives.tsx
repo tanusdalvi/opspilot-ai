@@ -12,9 +12,9 @@ import { Panel } from "./Panel";
 const TONE_CLASSES: Record<Tone, string> = {
   danger: "border-danger/35 bg-danger/10 text-danger",
   warn: "border-warn/35 bg-warn/10 text-warn",
-  info: "border-accent/35 bg-accent/10 text-[#9db9ff]",
+  info: "border-accent/35 bg-accent/10 text-accent",
   ok: "border-ok/35 bg-ok/10 text-ok",
-  muted: "border-line-strong bg-white/5 text-text-2",
+  muted: "border-line-strong bg-hover text-text-2",
 };
 
 const TONE_ICONS: Record<Tone, ReactNode> = {
@@ -61,11 +61,11 @@ export function Button({
 }) {
   const variants = {
     primary:
-      "bg-gradient-to-b from-accent to-[#4a76e6] text-white shadow-lg shadow-accent/25 hover:brightness-110",
+      "bg-accent text-white shadow-lg shadow-accent/25 hover:brightness-110",
     ghost:
       "border border-line-strong bg-transparent text-text-2 hover:text-text hover:border-accent/50",
     subtle:
-      "bg-white/[0.06] border border-line text-text hover:bg-white/[0.09]",
+      "bg-active border border-line text-text hover:border-line-strong",
     danger:
       "bg-danger/15 border border-danger/40 text-danger hover:bg-danger/25",
   };
@@ -93,8 +93,8 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-line-strong bg-white/[0.02] px-8 py-14 text-center">
-      <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-line bg-white/[0.04] text-accent">
+    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-line-strong bg-faint px-8 py-14 text-center">
+      <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-line bg-hover text-accent">
         {icon}
       </div>
       <h3 className="text-sm font-semibold uppercase tracking-wider text-text">
@@ -150,7 +150,7 @@ export function StrengthMeter({
           <span
             key={i}
             className={`h-2 w-full rounded-[2px] ${
-              i < filled ? tone : "bg-white/[0.07]"
+              i < filled ? tone : "bg-active"
             }`}
           />
         ))}

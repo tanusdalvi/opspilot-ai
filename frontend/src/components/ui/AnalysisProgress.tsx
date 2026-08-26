@@ -44,7 +44,7 @@ export function AnalysisProgress({
   ];
 
   return (
-    <div className="mt-4 rounded-xl border border-line bg-white/[0.02] px-4 py-4">
+    <div className="mt-4 rounded-xl border border-line bg-faint px-4 py-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="flex items-center gap-2 text-sm font-semibold text-text">
           {running ? (

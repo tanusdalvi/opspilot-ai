@@ -127,7 +127,7 @@ export function Accordion({
       <button
         onClick={onToggle}
         aria-expanded={open}
-        className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-white/[0.03]"
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-faint"
       >
         <motion.span
           animate={{ rotate: open ? 180 : 0 }}
@@ -180,7 +180,7 @@ export function ConfirmDialog({
       {open && (
         <>
           <motion.div
-            className="fixed inset-0 z-[60] bg-black/55 backdrop-blur-sm"
+            className="fixed inset-0 z-[60] bg-scrim backdrop-blur-sm"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
