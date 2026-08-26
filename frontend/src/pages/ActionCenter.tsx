@@ -15,7 +15,7 @@ import {
   EmptyState,
   SkeletonPanel,
 } from "../components/ui/Primitives";
-import { priorityLabel, statusLabel, statusTone } from "../lib/severity";
+import { priorityLabel, priorityTone, statusLabel, statusTone } from "../lib/severity";
 import type { RecommendationRecord } from "../lib/types";
 
 export default function ActionCenter() {
@@ -267,17 +267,4 @@ function ActionCard({ rec }: { rec: RecommendationRecord }) {
       </div>
     </Panel>
   );
-}
-
-function priorityTone(priority: string): "danger" | "warn" | "info" | "muted" {
-  switch (String(priority).toUpperCase()) {
-    case "CRITICAL":
-      return "danger";
-    case "HIGH":
-      return "warn";
-    case "MEDIUM":
-      return "info";
-    default:
-      return "muted";
-  }
 }

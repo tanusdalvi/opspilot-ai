@@ -21,7 +21,6 @@ const Analytics = lazy(() => import("./pages/Analytics"));
 const Explorer = lazy(() => import("./pages/Explorer"));
 const Recommendations = lazy(() => import("./pages/Recommendations"));
 const Anomalies = lazy(() => import("./pages/Anomalies"));
-const Insights = lazy(() => import("./pages/Insights"));
 const History = lazy(() => import("./pages/History"));
 
 function RouteFallback() {
@@ -139,13 +138,7 @@ export default function App() {
                   />
                   <Route
                     path="/insights"
-                    element={
-                      <Suspense fallback={<RouteFallback />}>
-                        <PageBoundary name="Insights">
-                          <Insights />
-                        </PageBoundary>
-                      </Suspense>
-                    }
+                    element={<Navigate to="/anomalies" replace />}
                   />
                   <Route
                     path="/evidence"

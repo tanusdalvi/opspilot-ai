@@ -28,9 +28,6 @@ export function metricLabel(raw: unknown): string {
   return METRIC_LABELS[key] ?? metricTitle(key);
 }
 
-/** @deprecated Use availableTrendMetrics() instead. */
-export const TREND_METRICS = ["revenue", "units_sold", "cost", "profit"] as const;
-
 /** Derive available trend metrics from daily_trends columns. */
 export function availableTrendMetrics(dailyTrends: Record<string, unknown>[] | null | undefined): string[] {
   if (!dailyTrends || dailyTrends.length === 0) return [];

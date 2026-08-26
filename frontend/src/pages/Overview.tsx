@@ -88,7 +88,7 @@ export default function Overview() {
         </section>
       )}
 
-      {ready && !topFindingsExist(findings) && (
+      {ready && findings.length === 0 && (
         <section aria-label="Findings" className="mt-6">
           <Panel className="p-5">
             <div className="flex items-center gap-3">
@@ -664,8 +664,4 @@ function greeting(): string {
   if (hour < 12) return "Good morning";
   if (hour < 18) return "Good afternoon";
   return "Good evening";
-}
-
-function topFindingsExist(findings: Finding[]): boolean {
-  return findings.length > 0;
 }

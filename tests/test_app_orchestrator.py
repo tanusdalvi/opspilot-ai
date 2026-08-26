@@ -311,12 +311,15 @@ class TestSinglePassOrchestration:
         assert artifacts.insights == pack["insights"]
         assert artifacts.grouping == pack["groups"]
 
-    def test_single_date_dataset_still_raises(self):
-        """Degenerate datasets keep the historical hard-failure contract."""
+    def test_single_date_dataset_graceful_period_comparison(self):
+        """Single-date datasets produce a graceful period-comparison fallback."""
         frame = make_valid_frame()
         single = frame[frame["date"] == "2026-01-01"].reset_index(drop=True)
-        with pytest.raises(DataValidationError):
-            orchestrator.run_pipeline(single)
+        artifacts = orchestrator.run_pipeline(single)
+        pc = artifacts.period_comparison
+        assert pc["periods"] == []
+        assert pc["comparison"] is None
+        assert "fewer than two distinct dates" in pc["summary"]
 
 
 # --- 5/6. demo CSV end to end and evidence pack ------------------------------------------------

@@ -4,6 +4,7 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   Radar,
+  Search,
 } from "lucide-react";
 import { useWorkspace } from "../state/workspace";
 import {
@@ -12,10 +13,13 @@ import {
   EmptyState,
   SkeletonPanel,
 } from "../components/ui/Primitives";
-import { Accordion } from "../components/ui/Controls";
+import { Accordion, SegmentedControl } from "../components/ui/Controls";
 import { PageHeader, Panel, SectionHeading } from "../components/ui/Panel";
 import { Drawer } from "../components/ui/Drawer";
-import { SEVERITY_ORDER, severity } from "../lib/severity";
+import {
+  SEVERITY_ORDER,
+  severity,
+} from "../lib/severity";
 import {
   anomalyTypeLabel,
   metricLabel,
@@ -24,22 +28,43 @@ import {
   signalTitle,
 } from "../lib/labels";
 import {
+  SEVERITIES,
+  countBySeverity,
   deviationDirection,
   deviationIsAdverse,
+  filterBySeverity,
   formatDeviation,
   groupByMetric,
+  sortSignals,
   topConcernSignal,
   signalPeriodRange,
   sortForPriority,
   type SeverityCounts,
+  type SeverityFilter,
+  type SignalSortKey,
 } from "../lib/signals";
 import { formatDateShort } from "../lib/format";
 import type { AnomalyRecord } from "../lib/types";
 
 type Filter = "ALL" | "CRITICAL_HIGH" | string;
 
+const FILTER_OPTIONS: { value: SeverityFilter; label: string }[] = [
+  { value: "ALL", label: "All" },
+  { value: "CRITICAL", label: "Critical" },
+  { value: "HIGH", label: "High" },
+  { value: "MEDIUM", label: "Medium" },
+  { value: "LOW", label: "Low" },
+];
+
+const SORT_OPTIONS: { value: SignalSortKey; label: string }[] = [
+  { value: "severity", label: "Severity" },
+  { value: "date", label: "Date" },
+  { value: "metric", label: "Metric" },
+];
+
 /** Top signals shown before "Show all" engages (progressive disclosure). */
 const TOP_COUNT = 6;
+const TABLE_PAGE = 12;
 
 export default function Anomalies() {
   const { system, artifacts } = useWorkspace();
@@ -47,11 +72,18 @@ export default function Anomalies() {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [openGroup, setOpenGroup] = useState<string | null>(null);
+  const [detailVisible, setDetailVisible] = useState(false);
+  const [tableFilter, setTableFilter] = useState<SeverityFilter>("ALL");
+  const [sortKey, setSortKey] = useState<SignalSortKey>("severity");
+  const [tableLimit, setTableLimit] = useState(TABLE_PAGE);
+  const [textSearch, setTextSearch] = useState("");
 
   const anomalies: AnomalyRecord[] = useMemo(
     () => artifacts?.anomaly_result?.anomalies ?? [],
     [artifacts],
   );
+
+  const severityCounts = useMemo(() => countBySeverity(anomalies), [anomalies]);
 
   // A new filter resets the disclosed window.
   useEffect(() => setShowAll(false), [filter]);
@@ -64,6 +96,10 @@ export default function Anomalies() {
     }
     return map;
   }, [anomalies]);
+
+  // A new filter resets the disclosed window.
+  useEffect(() => setShowAll(false), [filter]);
+  useEffect(() => setTableLimit(TABLE_PAGE), [tableFilter, sortKey, textSearch]);
 
   const filtered = useMemo(
     () =>
@@ -331,6 +367,196 @@ export default function Anomalies() {
             )}
           </section>
         </>
+      )}
+
+      {/* ── Severity Distribution Bar ── */}
+      {anomalies.length > 0 && (
+        <Panel className="mt-8 p-5">
+          <SectionHeading
+            title="Signal overview"
+            caption="Severity distribution across all detected signals."
+          />
+          <div
+            className="flex h-3 w-full overflow-hidden rounded-full"
+            role="img"
+            aria-label={`Severity breakdown: ${SEVERITIES.filter((k) => severityCounts[k] > 0).map((k) => `${severityCounts[k]} ${severity(k).label.toLowerCase()}`).join(", ")}`}
+          >
+            {SEVERITIES.map((key) =>
+              severityCounts[key] > 0 ? (
+                <span
+                  key={key}
+                  className={`h-full ${
+                    key === "CRITICAL"
+                      ? "bg-danger"
+                      : key === "HIGH"
+                        ? "bg-danger/70"
+                        : key === "MEDIUM"
+                          ? "bg-warn"
+                          : "bg-accent"
+                  }`}
+                  style={{
+                    width: `${(severityCounts[key] / anomalies.length) * 100}%`,
+                  }}
+                  title={`${severity(key).label}: ${severityCounts[key]}`}
+                />
+              ) : null,
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+            {SEVERITIES.map((key) =>
+              severityCounts[key] > 0 ? (
+                <span key={key} className="flex items-center gap-1.5 text-xs">
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      key === "CRITICAL"
+                        ? "bg-danger"
+                        : key === "HIGH"
+                          ? "bg-danger/70"
+                          : key === "MEDIUM"
+                            ? "bg-warn"
+                            : "bg-accent"
+                    }`}
+                    aria-hidden
+                  />
+                  <span className="text-text-2">{severity(key).label}</span>
+                  <span className="num font-bold text-text">{severityCounts[key]}</span>
+                </span>
+              ) : null,
+            )}
+          </div>
+        </Panel>
+      )}
+
+      {/* ── Detailed Evidence Table (progressive disclosure) ── */}
+      <div className="mt-8 text-center">
+        <button
+          onClick={() => setDetailVisible((v) => !v)}
+          className="text-sm font-semibold text-accent underline-offset-2 hover:underline"
+          aria-expanded={detailVisible}
+        >
+          {detailVisible ? "Hide detailed evidence" : "Show detailed evidence"}
+        </button>
+      </div>
+
+      {detailVisible && (
+        <section aria-label="All Evidence" className="mt-4">
+          <SectionHeading
+            title="All Evidence"
+            caption="Full deterministic record set with filtering and sorting."
+            actions={
+              <SegmentedControl
+                ariaLabel="Sort signals"
+                options={SORT_OPTIONS}
+                value={sortKey}
+                onChange={setSortKey}
+              />
+            }
+          />
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+            <SegmentedControl
+              ariaLabel="Filter by severity"
+              options={FILTER_OPTIONS}
+              value={tableFilter}
+              onChange={setTableFilter}
+            />
+            <div className="relative w-full sm:max-w-xs">
+              <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-muted" aria-hidden />
+              <input
+                type="text"
+                placeholder="Search signals..."
+                value={textSearch}
+                onChange={(e) => setTextSearch(e.target.value)}
+                className="w-full rounded-lg border border-line-strong bg-transparent px-3 py-1.5 pl-8 text-xs text-text placeholder:text-text-muted focus:border-accent/50 focus:outline-none"
+              />
+            </div>
+          </div>
+
+          {(() => {
+            const searchQuery = textSearch.trim().toLowerCase();
+            const searchFiltered = searchQuery
+              ? anomalies.filter((a) => signalTitle(a).toLowerCase().includes(searchQuery))
+              : anomalies;
+            const visible = sortSignals(
+              filterBySeverity(searchFiltered, tableFilter),
+              sortKey,
+            );
+            if (visible.length === 0) {
+              return (
+                <Panel className="p-6 text-center text-sm text-text-2">
+                  No signals match your filters.{" "}
+                  {(tableFilter !== "ALL" || textSearch) && (
+                    <button
+                      onClick={() => {
+                        setTableFilter("ALL");
+                        setTextSearch("");
+                      }}
+                      className="font-semibold text-accent underline-offset-2 hover:underline"
+                    >
+                      Clear filters
+                    </button>
+                  )}
+                </Panel>
+              );
+            }
+            return (
+              <>
+                <p className="mb-2 text-xs text-text-muted">
+                  Showing {Math.min(tableLimit, visible.length)} of {visible.length} signal{visible.length === 1 ? "" : "s"}
+                </p>
+                <Panel className="overflow-hidden">
+                  <table className="w-full text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-line text-[10px] uppercase tracking-[0.16em] text-text-muted">
+                        <th className="px-4 py-2.5 font-bold">Signal</th>
+                        <th className="hidden px-4 py-2.5 font-bold md:table-cell">Scope</th>
+                        <th className="hidden px-4 py-2.5 font-bold sm:table-cell">Date</th>
+                        <th className="px-4 py-2.5 text-right font-bold">Deviation</th>
+                        <th className="px-4 py-2.5 font-bold">Severity</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visible.slice(0, tableLimit).map((record) => {
+                        const style = severity(record.severity);
+                        return (
+                          <tr
+                            key={recordKey(record)}
+                            className="border-b border-line/60 last:border-0 transition-colors hover:bg-faint"
+                          >
+                            <td className="px-4 py-2.5 font-medium text-text">
+                              {signalTitle(record)}
+                            </td>
+                            <td className="hidden px-4 py-2.5 text-xs text-text-2 md:table-cell">
+                              {scopeLabel(record.scope)}
+                            </td>
+                            <td className="num hidden px-4 py-2.5 text-xs text-text-2 sm:table-cell">
+                              {record.date ? formatDateShort(String(record.date)) : "---"}
+                            </td>
+                            <td className="num px-4 py-2.5 text-right font-bold">
+                              {formatDeviation(Number(record.deviation_pct ?? 0))}
+                            </td>
+                            <td className="px-4 py-2.5">
+                              <Badge tone={style.tone}>{style.label}</Badge>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </Panel>
+                {visible.length > tableLimit && (
+                  <div className="mt-4 flex items-center justify-between">
+                    <p className="text-xs text-text-muted">
+                      Showing {tableLimit} of {visible.length}
+                    </p>
+                    <Button variant="ghost" onClick={() => setTableLimit((n) => n + TABLE_PAGE)}>
+                      Show more
+                    </Button>
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </section>
       )}
 
       <Drawer

@@ -427,9 +427,13 @@ def run_pipeline(
             "summary": "Period comparison unavailable: dataset has no time dimension.",
         }
     elif period_comparison is None:
-        # Degenerate (< two dates) dataset: reproduce the hard failure
-        # the direct call always raised instead of rendering ``None``.
-        period_comparison = calculate_period_comparison(df)
+        # Single-date or otherwise degenerate time-series: no meaningful
+        # period-over-period comparison is possible.
+        period_comparison = {
+            "periods": [],
+            "comparison": None,
+            "summary": "Period comparison unavailable: dataset has fewer than two distinct dates.",
+        }
     insights = pack["insights"]
     grouping = pack["groups"]
     findings = build_findings(

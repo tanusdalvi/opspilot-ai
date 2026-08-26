@@ -22,7 +22,7 @@ import {
   SkeletonPanel,
 } from "../components/ui/Primitives";
 import { ConfirmDialog } from "../components/ui/Controls";
-import { priorityLabel, statusLabel, statusTone } from "../lib/severity";
+import { priorityLabel, priorityTone, statusLabel, statusTone } from "../lib/severity";
 import type { RecommendationRecord, Finding } from "../lib/types";
 
 const DECISIONS = [
@@ -507,17 +507,4 @@ function ReviewDetail({
       )}
     </Panel>
   );
-}
-
-function priorityTone(priority: string): "danger" | "warn" | "info" | "muted" {
-  switch (String(priority).toUpperCase()) {
-    case "CRITICAL":
-      return "danger";
-    case "HIGH":
-      return "warn";
-    case "MEDIUM":
-      return "info";
-    default:
-      return "muted";
-  }
 }

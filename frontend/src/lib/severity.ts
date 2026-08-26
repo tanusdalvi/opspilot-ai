@@ -84,3 +84,17 @@ export function metricTitle(key: string): string {
     .replace(/_/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
+
+/** Tone band for a recommendation priority level. */
+export function priorityTone(priority: string): "danger" | "warn" | "info" | "muted" {
+  switch (String(priority).toUpperCase()) {
+    case "CRITICAL":
+      return "danger";
+    case "HIGH":
+      return "warn";
+    case "MEDIUM":
+      return "info";
+    default:
+      return "muted";
+  }
+}
